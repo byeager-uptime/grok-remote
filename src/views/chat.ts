@@ -1306,7 +1306,7 @@ export class ChatView {
   openStreamForCurrent() {
     if (!this.agentId) return;
     this.showStatus('connecting...', 'idle');
-    this.stream = openStream(`/api/agents/${encodeURIComponent(this.agentId)}/stream`, {
+    this.stream = openStream(api.streamUrl(this.agentId), {
       onOpen:  () => this.showStatus('connected', 'ok'),
       onError: () => this.showStatus('stream error · reconnecting', 'warn'),
       onAny:   (name, data) => this.handleEvent(name, data),

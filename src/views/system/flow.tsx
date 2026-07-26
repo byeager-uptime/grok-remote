@@ -1173,7 +1173,7 @@ function FlowInner({ filterIds = null }) {
     // token bumps.
     replayHistoryFor(agent);
 
-    const url = `/api/agents/${encodeURIComponent(agent.id)}/stream`;
+    const url = api.streamUrl(agent.id);
     let es;
     try {
       es = new EventSource(url);
@@ -1307,7 +1307,7 @@ function FlowInner({ filterIds = null }) {
     let sseAlive = false;
     let es;
     try {
-      es = new EventSource('/api/agents/stream');
+      es = new EventSource(api.agentsStreamUrl());
       es.addEventListener('open', () => { sseAlive = true; });
       es.addEventListener('agents_snapshot', () => { refresh(); });
       es.addEventListener('agent_added',   () => { refresh(); });

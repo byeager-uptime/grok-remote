@@ -22,3 +22,9 @@ experiments/*.log
 experiments/exp*-out.txt
 experiments/exp*-prompt.txt
 LOOP_LOG.md
+token
+# local secrets / runtime
+.env.pm2
+pm2.env
+.grok-remote-token
+*.token

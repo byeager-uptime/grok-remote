@@ -1,5 +1,46 @@
 // PM2 ecosystem for grok-remote.
 // Run `pm2 start ecosystem.config.cjs` (the installer does this for you).
+//
+// Security defaults for this fork (see SECURITY_AUDIT.md):
+//   - Prefer GROK_REMOTE_TOKEN_FILE over empty token
+//   - Bind HOST=0.0.0.0 only when you also set a token (fail-closed otherwise)
+//   - Default HOST remains 127.0.0.1 if nothing is set
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+function readDotEnv(file) {
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const out = {};
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i < 0) continue;
+      out[t.slice(0, i)] = t.slice(i + 1);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+const fileEnv = readDotEnv(path.join(__dirname, '.env.pm2'));
+const defaultTokenFile = path.join(os.homedir(), '.grok-remote', 'token');
+
+const HOST =
+  process.env.HOST ||
+  process.env.GROK_REMOTE_HOST ||
+  fileEnv.HOST ||
+  fileEnv.GROK_REMOTE_HOST ||
+  '127.0.0.1';
+
+const GROK_REMOTE_TOKEN_FILE =
+  process.env.GROK_REMOTE_TOKEN_FILE ||
+  fileEnv.GROK_REMOTE_TOKEN_FILE ||
+  (fs.existsSync(defaultTokenFile) ? defaultTokenFile : '');
 
 module.exports = {
   apps: [
@@ -7,7 +48,9 @@ module.exports = {
       name: 'grok-remote',
       script: 'server.ts',
       interpreter: 'node',
-      interpreter_args: '--import tsx',
+      // Resolve tsx from local node_modules (absolute) so PM2 cwd quirks cannot
+      // break --import resolution.
+      interpreter_args: `--import ${path.join(__dirname, 'node_modules/tsx/dist/esm/index.mjs')}`,
       cwd: __dirname,
       instances: 1,
       exec_mode: 'fork',
@@ -16,8 +59,12 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: 'production',
-        PORT: 7910,
-        HOST: process.env.GROK_REMOTE_HOST || '0.0.0.0',
+        PORT: Number(process.env.PORT || fileEnv.PORT || 7910),
+        HOST,
+        GROK_REMOTE_HOST: HOST,
+        GROK_REMOTE_TOKEN: process.env.GROK_REMOTE_TOKEN || fileEnv.GROK_REMOTE_TOKEN || '',
+        GROK_REMOTE_TOKEN_FILE,
+        GROK_REMOTE_ALLOW_OPEN: process.env.GROK_REMOTE_ALLOW_OPEN || fileEnv.GROK_REMOTE_ALLOW_OPEN || '',
       },
       out_file: './logs/grok-remote.out.log',
       error_file: './logs/grok-remote.err.log',

@@ -3,6 +3,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 
 const DEFAULT_LIMIT = 256 * 1024;
 
@@ -100,20 +101,51 @@ export function createTerminalHost({ getCwd }: TerminalHostOptions): TerminalHos
     if (typeof command !== 'string' || !command.length) {
       throw rpcError(-32602, 'terminal/create: command required');
     }
-    const cwd = params?.cwd || getCwd() || process.cwd();
+    // Agent scope cwd. Allow explicit cwd only when it resolves under the agent
+    // working directory (or is exactly that directory). Absolute paths outside
+    // the agent scope are rejected — the shell can still reach them via
+    // command strings, but we refuse to *start* with an escaped cwd.
+    const scope = getCwd() || process.cwd();
+    const requested = params?.cwd;
+    let cwd = scope;
+    if (typeof requested === 'string' && requested.length) {
+      const scopeAbs = path.resolve(scope);
+      const resolved = path.isAbsolute(requested)
+        ? path.resolve(requested)
+        : path.resolve(scopeAbs, requested);
+      if (resolved !== scopeAbs && !resolved.startsWith(scopeAbs + path.sep)) {
+        throw rpcError(-32002, `terminal cwd escapes agent scope: ${requested}`);
+      }
+      cwd = resolved;
+    }
     const limit = typeof params?.outputByteLimit === 'number'
       ? params.outputByteLimit
       : DEFAULT_LIMIT;
+    // Do not let the agent inject arbitrary env keys that override PATH/HOME
+    // to unexpected values without an explicit allow-list. Merge only
+    // non-critical overrides on top of a minimal base.
     const envObj = envArrayToObject(params?.env);
+    const blockedEnv = new Set(['LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'NODE_OPTIONS']);
+    const safeEnvExtra: Record<string, string> = {};
+    if (envObj) {
+      for (const [k, v] of Object.entries(envObj)) {
+        if (blockedEnv.has(k)) continue;
+        safeEnvExtra[k] = v;
+      }
+    }
     const env: NodeJS.ProcessEnv = {
       PATH: process.env['PATH'],
       HOME: process.env['HOME'],
-      ...(envObj || {}),
+      TERM: process.env['TERM'] || 'xterm-256color',
+      LANG: process.env['LANG'] || 'C.UTF-8',
+      ...safeEnvExtra,
     };
 
     let cmd: string;
     let args: string[];
     if (Array.isArray(params?.args) && params.args.length) {
+      // Refuse path-like command binaries that look like shell metachar injection
+      // vectors in the binary name; args are passed as argv (not shell).
       cmd = command;
       args = params.args.map((a) => String(a));
     } else {

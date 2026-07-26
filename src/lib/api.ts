@@ -5,10 +5,52 @@ export interface ApiError extends Error {
   body?: unknown;
 }
 
+const TOKEN_STORAGE_KEY = 'grok-remote-token';
+
+/** Read the optional API bearer token (localStorage or ?token= on first load). */
+export function getAuthToken(): string {
+  try {
+    const fromStore = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (fromStore) return fromStore;
+  } catch { /* private mode */ }
+  try {
+    const q = new URLSearchParams(window.location.search).get('token');
+    if (q) {
+      try { localStorage.setItem(TOKEN_STORAGE_KEY, q); } catch { /* ignore */ }
+      return q;
+    }
+  } catch { /* ignore */ }
+  return '';
+}
+
+export function setAuthToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch { /* ignore */ }
+}
+
+/** Append token query param when EventSource / raw URLs cannot set headers. */
+export function withAuthQuery(url: string): string {
+  const token = getAuthToken();
+  if (!token) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  if (!token) return {};
+  return {
+    Authorization: `Bearer ${token}`,
+    'X-Grok-Remote-Token': token,
+  };
+}
+
 async function request(method: string, path: string, body?: unknown): Promise<unknown> {
   const opts: RequestInit = {
     method,
-    headers: { accept: 'application/json' },
+    headers: { accept: 'application/json', ...authHeaders() },
   };
   if (body !== undefined) {
     (opts.headers as Record<string, string>)['content-type'] = 'application/json';
@@ -56,7 +98,7 @@ export const api = {
   models:   (): Promise<unknown>   => request('GET',    '/api/models'),
 
   listAgents:      (): Promise<unknown> => request('GET',    '/api/agents'),
-  agentsStreamUrl: (): string => '/api/agents/stream',
+  agentsStreamUrl: (): string => withAuthQuery('/api/agents/stream'),
   getAgent:     (id: string): Promise<unknown>          => request('GET',    `/api/agents/${encodeURIComponent(id)}`),
   createAgent:  (body?: Record<string, unknown>): Promise<unknown>  => request('POST',   '/api/agents', body || {}),
   deleteAgent:  (id: string): Promise<unknown>          => request('DELETE', `/api/agents/${encodeURIComponent(id)}`),
@@ -85,7 +127,7 @@ export const api = {
     if (all) qs.set('all', '1');
     if (typeof turns === 'number' && turns > 0) qs.set('turns', String(turns));
     const url = `/api/agents/${encodeURIComponent(id)}/history${qs.toString() ? `?${qs}` : ''}`;
-    const r = await fetch(url, { headers: { accept: 'application/x-ndjson' } });
+    const r = await fetch(url, { headers: { accept: 'application/x-ndjson', ...authHeaders() } });
     if (!r.ok) {
       const err = new Error(`HTTP ${r.status}`) as ApiError;
       err.status = r.status;
@@ -106,8 +148,9 @@ export const api = {
   },
   listFiles:    (id: string, path?: string): Promise<unknown> => request('GET', `/api/agents/${encodeURIComponent(id)}/files${path ? `?path=${encodeURIComponent(path)}` : ''}`),
   readFile:     (id: string, path: string): Promise<unknown> => request('GET', `/api/agents/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path)}`),
-  fileRawUrl:   (id: string, p?: string): string => `/api/agents/${encodeURIComponent(id)}/files/raw?path=${encodeURIComponent(p || '')}`,
+  fileRawUrl:   (id: string, p?: string): string => withAuthQuery(`/api/agents/${encodeURIComponent(id)}/files/raw?path=${encodeURIComponent(p || '')}`),
   trace:        (id: string): Promise<unknown> => request('GET', `/api/agents/${encodeURIComponent(id)}/trace`),
+  streamUrl:    (id: string): string => withAuthQuery(`/api/agents/${encodeURIComponent(id)}/stream`),
 
   terminals: {
     list:   (id: string): Promise<unknown>          => request('GET',    `/api/agents/${encodeURIComponent(id)}/terminals`),
@@ -262,6 +305,6 @@ export const api = {
     diff:       (): Promise<unknown> => request('GET', '/api/version/diff'),
     releases:   ({ force = false }: { force?: boolean } = {}): Promise<unknown> =>
       request('GET', `/api/version/releases${force ? '?force=1' : ''}`),
-    updateUrl:  (): string => '/api/version/update',
+    updateUrl:  (): string => withAuthQuery('/api/version/update'),
   },
 };

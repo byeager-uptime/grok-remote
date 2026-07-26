@@ -2,6 +2,7 @@
 // Scoped to the agent's working directory so a misbehaving agent can't escape.
 
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 
 export interface RpcError extends Error {
@@ -33,11 +34,22 @@ export interface FsHost {
 }
 
 function withinScope(scopeDir: string | null | undefined, target: string): boolean {
+  // Null scope disables the fence (legacy). Prefer always providing a cwd.
   if (!scopeDir) return true;
   const scope = path.resolve(scopeDir);
   const resolved = path.resolve(target);
-  // Allow exact scope dir match plus any descendant.
-  return resolved === scope || resolved.startsWith(scope + path.sep);
+  // Allow exact scope dir match plus any descendant (separator-aware).
+  if (!(resolved === scope || resolved.startsWith(scope + path.sep))) return false;
+  // If the path exists, realpath to block symlink escapes outside scope.
+  try {
+    if (fsSync.existsSync(resolved)) {
+      const real = fsSync.realpathSync(resolved);
+      return real === scope || real.startsWith(scope + path.sep);
+    }
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 function rpcError(code: number, message: string): RpcError {

@@ -34,12 +34,16 @@ import {
   readReleases,
   type UpdateStepEvent,
 } from './lib/version-update.js';
+import { loadAuthConfig, checkAuth, logAuthStartup, type AuthConfig } from './lib/auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
 const DIST = path.join(ROOT, 'dist');
 const PORT = parseInt(process.env['PORT'] || '7910', 10);
-const HOST = process.env['HOST'] || '0.0.0.0';
+// Prefer explicit HOST, then installer-set GROK_REMOTE_HOST, else fail-safe loopback.
+// Original upstream defaulted to 0.0.0.0 with no app auth — unsafe on public NICs.
+const HOST = process.env['HOST'] || process.env['GROK_REMOTE_HOST'] || '127.0.0.1';
+const AUTH_CFG: AuthConfig = loadAuthConfig(process.env, HOST);
 
 const APP_VERSION: string = (() => {
   try {
@@ -75,9 +79,50 @@ interface TailscaleIdentity {
 }
 
 function safeJoin(base: string, rel: string): string | null {
-  const target = path.resolve(base, '.' + rel);
-  if (!target.startsWith(base)) return null;
+  const resolvedBase = path.resolve(base);
+  const target = path.resolve(resolvedBase, '.' + rel);
+  // Require exact match or descendant with path separator (not prefix of sibling).
+  if (target !== resolvedBase && !target.startsWith(resolvedBase + path.sep)) return null;
   return target;
+}
+
+/** Resolve real path and ensure it stays inside scope (blocks symlink escapes). */
+function resolveWithinScope(scopeDir: string, relOrAbs: string): string | null {
+  const scope = path.resolve(scopeDir);
+  let candidate: string;
+  try {
+    candidate = path.isAbsolute(relOrAbs)
+      ? path.resolve(relOrAbs)
+      : path.resolve(scope, relOrAbs);
+  } catch {
+    return null;
+  }
+  if (candidate !== scope && !candidate.startsWith(scope + path.sep)) return null;
+  // If the path exists, realpath to defeat symlink escapes outside scope.
+  try {
+    if (fs.existsSync(candidate)) {
+      const real = fs.realpathSync(candidate);
+      if (real !== scope && !real.startsWith(scope + path.sep)) return null;
+      return real;
+    }
+  } catch {
+    return null;
+  }
+  // Non-existent path: ensure every existing parent stays in scope.
+  let parent = path.dirname(candidate);
+  while (parent && parent !== path.dirname(parent)) {
+    try {
+      if (fs.existsSync(parent)) {
+        const realParent = fs.realpathSync(parent);
+        if (realParent !== scope && !realParent.startsWith(scope + path.sep)) return null;
+        break;
+      }
+    } catch {
+      return null;
+    }
+    parent = path.dirname(parent);
+  }
+  return candidate;
 }
 
 function tailscaleIdentity(): TailscaleIdentity | null {
@@ -662,9 +707,7 @@ function sliceHistoryByTurns(raw: string, { all, turns }: SliceHistoryOptions): 
 const FILE_MAX_BYTES = 256_000;
 
 function withinAgentScope(scopeDir: string, target: string): boolean {
-  const scope = path.resolve(scopeDir);
-  const resolved = path.resolve(target);
-  return resolved === scope || resolved.startsWith(scope + path.sep);
+  return resolveWithinScope(scopeDir, target) !== null;
 }
 
 function _req(req: IncomingMessage): IncomingMessage { return req; }
@@ -677,14 +720,8 @@ function handleFilesList(req: IncomingMessage, res: ServerResponse, rec: PublicA
   const rel = urlObj.searchParams.get('path') || '';
   const cleanRel = String(rel).replace(/^\/+/, '');
 
-  let target: string;
-  try {
-    target = path.resolve(cwd, cleanRel);
-  } catch {
-    sendJson(res, 400, { ok: false, error: 'invalid path' });
-    return;
-  }
-  if (!withinAgentScope(cwd, target)) {
+  const target = resolveWithinScope(cwd, cleanRel);
+  if (!target) {
     sendJson(res, 400, { ok: false, error: 'path escapes agent scope' });
     return;
   }
@@ -864,14 +901,8 @@ function handleFilesRaw(req: IncomingMessage, res: ServerResponse, rec: PublicAg
   const rel = urlObj.searchParams.get('path') || '';
   const cleanRel = String(rel).replace(/^\/+/, '');
 
-  let target: string;
-  try {
-    target = path.resolve(cwd, cleanRel);
-  } catch {
-    sendJson(res, 400, { ok: false, error: 'invalid path' });
-    return;
-  }
-  if (!withinAgentScope(cwd, target)) {
+  const target = resolveWithinScope(cwd, cleanRel);
+  if (!target) {
     sendJson(res, 400, { ok: false, error: 'path escapes agent scope' });
     return;
   }
@@ -1160,10 +1191,26 @@ function handleTerminalKill(_req2: IncomingMessage, res: ServerResponse, rec: Pu
   const bg = a && a.bgTasks && a.bgTasks.get(tid);
   if (!bg) { sendJson(res, 404, { ok: false, error: 'terminal not found' }); return; }
   if (bg.completed) { sendJson(res, 200, { ok: true, alreadyExited: true }); return; }
+  // Prefer killing via output_file pattern only when it looks unique and
+  // path-like. Never pkill -f on short/generic cwd strings (e.g. "/", "/tmp")
+  // which would match unrelated processes.
+  const outFile = typeof bg.output_file === 'string' ? bg.output_file : '';
   const cwd = bg.cwd || '';
-  if (!cwd) { sendJson(res, 500, { ok: false, error: 'task has no cwd; cannot derive kill pattern' }); return; }
+  let pattern: string | null = null;
+  if (outFile.length >= 12 && outFile.includes(path.sep)) {
+    pattern = outFile;
+  } else if (cwd.length >= 12 && cwd.includes(path.sep) && cwd !== '/' && cwd !== path.sep) {
+    pattern = cwd;
+  }
+  if (!pattern) {
+    sendJson(res, 500, {
+      ok: false,
+      error: 'refusing broad pkill: no unique output_file/cwd pattern for this bg task',
+    });
+    return;
+  }
   try {
-    spawnSync('/usr/bin/pkill', ['-TERM', '-f', cwd], { timeout: 4000 });
+    spawnSync('/usr/bin/pkill', ['-TERM', '-f', '--', pattern], { timeout: 4000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sendJson(res, 500, { ok: false, error: `pkill failed: ${msg}` });
@@ -1266,6 +1313,18 @@ function handleStream(req: IncomingMessage, res: ServerResponse, id: string): vo
 
 const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
   const url = (req.url || '').split('?')[0] || '/';
+  const method = req.method || 'GET';
+
+  // App-level auth for all /api/* (static UI remains open so the PWA can load;
+  // the SPA must send the token on API calls — see lib/auth.ts).
+  if (url.startsWith('/api/')) {
+    const auth = checkAuth(req, url, method, AUTH_CFG);
+    if (!auth.ok) {
+      sendJson(res, auth.status, { ok: false, error: auth.error || 'unauthorized' });
+      return;
+    }
+  }
+
   if (url.startsWith('/api/system/')) {
     try {
       await handleSystem(req, res, url);
@@ -1279,7 +1338,7 @@ const server = http.createServer(async (req: IncomingMessage, res: ServerRespons
   }
   if (url.startsWith('/api/')) {
     try {
-      await handleApi(req, res, url, req.method || 'GET');
+      await handleApi(req, res, url, method);
     } catch (err) {
       if (!res.headersSent) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1298,6 +1357,13 @@ server.listen(PORT, HOST, () => {
   const where = ts?.dns ? `http://${ts.dns}:${PORT}` : `http://${HOST}:${PORT}`;
   console.log(`[grok-remote] listening on ${HOST}:${PORT}`);
   console.log(`[grok-remote] tailnet url: ${where}`);
+  logAuthStartup(AUTH_CFG);
+  if (HOST === '0.0.0.0' || HOST === '::') {
+    console.warn(
+      '[grok-remote] WARNING: bound to all interfaces. Prefer Tailscale-only ' +
+      'access + GROK_REMOTE_TOKEN, or HOST=127.0.0.1 with an SSH/Tailscale tunnel.',
+    );
+  }
 });
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
