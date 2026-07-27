@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Grok Remote — ChatGPT-faithful mocks</title>
+  <style>
+    /* Closely mirror ChatGPT mobile Remote: near-black, soft grey type, pill chrome */
+    :root {
+      --bg: #000000;
+      --surface: #0d0d0d;
+      --elevated: #1a1a1a;
+      --elevated2: #212121;
+      --border: #2f2f2f;
+      --fg: #ececec;
+      --muted: #8e8e8e;
+      --dim: #6b6b6b;
+      --green: #19c37d;
+      --blue-pill: #fff;
+      --accent: #10a37f; /* ChatGPT-ish green for brand accents only sparingly */
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Söhne", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #111;
+      color: var(--fg);
+      padding: 28px 20px 40px;
+    }
+    h1 { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+    .note { color: var(--muted); font-size: 13px; max-width: 720px; line-height: 1.45; margin-bottom: 22px; }
+    .row { display: flex; flex-wrap: wrap; gap: 32px; }
+    .cap { font-size: 12px; color: var(--muted); margin-bottom: 10px; letter-spacing: 0.02em; }
+
+    .phone {
+      width: 390px;
+      height: 844px;
+      background: var(--bg);
+      border-radius: 44px;
+      border: 1px solid #333;
+      box-shadow: 0 24px 80px rgba(0,0,0,.55);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* status bar */
+    .sb {
+      height: 50px;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      padding: 0 28px 10px;
+      font-size: 15px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .sb-r { font-size: 13px; font-weight: 500; letter-spacing: 0.02em; opacity: .9; }
+
+    /* ===== M1 Remote list (ChatGPT Remote right pane, full-phone) ===== */
+    .m1-header {
+      display: grid;
+      grid-template-columns: 44px 1fr 44px 44px;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 12px 10px;
+      flex-shrink: 0;
+    }
+    .circ {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      background: var(--elevated);
+      border: none;
+      color: var(--fg);
+      display: grid; place-items: center;
+      font-size: 17px;
+      cursor: default;
+    }
+    .m1-center {
+      text-align: center;
+      line-height: 1.15;
+    }
+    .m1-center .h {
+      font-size: 17px;
+      font-weight: 600;
+    }
+    .m1-center .host {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 3px;
+      font-weight: 400;
+    }
+    .host-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green);
+    }
+    .host-ico { opacity: .75; font-size: 11px; }
+
+    .m1-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 18px 12px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .projects-label {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 6px 0 14px;
+      letter-spacing: -0.02em;
+    }
+
+    .proj {
+      margin-bottom: 6px;
+    }
+    .proj-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 2px 8px;
+      color: var(--fg);
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .proj-head .folder {
+      width: 18px; height: 18px;
+      opacity: .9;
+      flex-shrink: 0;
+    }
+    .proj-head .name { flex: 1; }
+    .proj-head .chev {
+      color: var(--dim);
+      font-size: 11px;
+      margin-left: 2px;
+    }
+    .proj-head .ext {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      display: grid; place-items: center;
+      color: var(--muted);
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .thread-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 8px 11px 26px;
+      font-size: 15px;
+      font-weight: 400;
+      color: var(--fg);
+      border-radius: 10px;
+      line-height: 1.3;
+    }
+    .thread-row .t {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Minimal status — ChatGPT doesn't use loud chips; tiny dots only for triage */
+    .st {
+      width: 6px; height: 6px; border-radius: 50%;
+      flex-shrink: 0;
+      background: transparent;
+    }
+    .st.stuck { background: #ef4444; }
+    .st.running { background: #3b82f6; }
+    .st.waiting { background: #a3a3a3; }
+    .st.done { background: transparent; border: 1px solid #444; }
+
+    .m1-bottom {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+      border-top: 1px solid #1a1a1a;
+      background: var(--bg);
+    }
+    .chats-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--elevated);
+      border-radius: 20px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--fg);
+    }
+    .chats-pill .down { font-size: 10px; color: var(--muted); }
+    .m1-actions { display: flex; gap: 10px; }
+    .m1-actions .circ.white {
+      background: #fff;
+      color: #111;
+      width: 40px; height: 40px;
+    }
+
+    /* ===== M3 Thread (ChatGPT Remote conversation) ===== */
+    .m3-header {
+      display: grid;
+      grid-template-columns: 40px 40px 1fr 40px 40px;
+      align-items: center;
+      gap: 2px;
+      padding: 2px 10px 10px;
+      flex-shrink: 0;
+    }
+    .m3-titles { text-align: center; min-width: 0; padding: 0 4px; }
+    .m3-titles .t1 {
+      font-size: 15px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .m3-titles .t2 {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 400;
+      margin-top: 2px;
+    }
+
+    .m3-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 20px 20px;
+    }
+    .quote {
+      border-left: 2px solid #3a3a3a;
+      padding: 4px 0 4px 14px;
+      margin: 8px 0 20px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.45;
+      font-style: normal;
+    }
+    .body-text {
+      font-size: 16px;
+      line-height: 1.55;
+      color: var(--fg);
+      font-weight: 400;
+    }
+    .body-text p { margin: 0 0 14px; }
+    .body-text strong { font-weight: 600; }
+    .body-text a {
+      color: var(--fg);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .tl { font-weight: 600; margin: 18px 0 10px; font-size: 16px; }
+
+    .m3-bottom {
+      flex-shrink: 0;
+      padding: 8px 14px calc(16px + env(safe-area-inset-bottom, 0px));
+      background: var(--bg);
+    }
+    .work-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--elevated);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 8px 10px 8px 12px;
+      min-height: 52px;
+    }
+    .work-bar .plus {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-size: 22px;
+      line-height: 1;
+    }
+    .work-bar .placeholder {
+      flex: 1;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 400;
+    }
+    .work-bar .mic {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    /* Subtle stuck cue — not loud “ops console” */
+    .soft-stuck {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #f87171;
+      margin: 0 0 14px;
+      font-weight: 500;
+    }
+    .soft-stuck::before {
+      content: "";
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #ef4444;
+    }
+  </style>
+</head>
+<body>
+  <h1>Grok Remote mocks — ChatGPT Remote visual language</h1>
+  <p class="note">
+    Fresh design from your ChatGPT screenshots: pure black, soft greys, pill chrome,
+    Projects with folder rows + thread titles, thread view with quote + TL;DR body +
+    “Work on hermes-agent” bar. No old grok-remote console chrome. Tiny status dots only
+    (stuck/running) so triage still works without looking like a devops dashboard.
+  </p>
+
+  <div class="row">
+    <!-- ========== M1 ========== -->
+    <div>
+      <div class="cap">M1 — Remote list (phone full-screen)</div>
+      <div class="phone" id="m1">
+        <div class="sb"><span>9:41</span><span class="sb-r">▮▮▮  Wi‑Fi  🔋</span></div>
+        <div class="m1-header">
+          <button class="circ" aria-label="menu">☰</button>
+          <div class="m1-center">
+            <div class="h">Remote</div>
+            <div class="host">
+              <span class="host-dot"></span>
+              <span class="host-ico">💻</span>
+              hermes-agent
+            </div>
+          </div>
+          <button class="circ" aria-label="more">⋯</button>
+          <button class="circ" aria-label="search">⌕</button>
+        </div>
+        <div class="m1-scroll">
+          <div class="projects-label">Projects</div>
+
+          <div class="proj">
+            <div class="proj-head">
+              <svg class="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-10z"/></svg>
+              <span class="name">navimow-x430-lab</span>
+              <span class="chev">▾</span>
+              <span class="ext">↗</span>
+            </div>
+            <div class="thread-row"><span class="st stuck"></span><span class="t">Navimow mow completion confidence</span></div>
+            <div class="thread-row"><span class="st running"></span><span class="t">Schedule telemetry evidence</span></div>
+            <div class="thread-row"><span class="st done"></span><span class="t">Yard done status audit trail</span></div>
+          </div>
+
+          <div class="proj">
+            <div class="proj-head">
+              <svg class="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-10z"/></svg>
+              <span class="name">root</span>
+              <span class="chev">▾</span>
+              <span class="ext">↗</span>
+            </div>
+            <div class="thread-row"><span class="st stuck"></span><span class="t">Background workflow stopped review</span></div>
+            <div class="thread-row"><span class="st waiting"></span><span class="t">Grok settings customization</span></div>
+            <div class="thread-row"><span class="st done"></span><span class="t">Audit Cloudflare vs Codex prompts</span></div>
+          </div>
+
+          <div class="proj">
+            <div class="proj-head">
+              <svg class="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-10z"/></svg>
+              <span class="name">warren-site</span>
+              <span class="chev">▾</span>
+              <span class="ext">↗</span>
+            </div>
+            <div class="thread-row"><span class="st waiting"></span><span class="t">Audit repo branches and worktrees</span></div>
+            <div class="thread-row"><span class="st done"></span><span class="t">Review open issues for delegation</span></div>
+          </div>
+
+          <div class="proj">
+            <div class="proj-head">
+              <svg class="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-10z"/></svg>
+              <span class="name">holdings_automation</span>
+              <span class="chev">▾</span>
+              <span class="ext">↗</span>
+            </div>
+            <div class="thread-row"><span class="st running"></span><span class="t">Run blind spot audit</span></div>
+          </div>
+        </div>
+        <div class="m1-bottom">
+          <div class="chats-pill">Chats <span class="down">▾</span></div>
+          <div class="m1-actions">
+            <button class="circ" aria-label="voice">🎙</button>
+            <button class="circ white" aria-label="new">✎</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== M3 ========== -->
+    <div>
+      <div class="cap">M3 — Thread (phone full-screen)</div>
+      <div class="phone" id="m3">
+        <div class="sb"><span>9:41</span><span class="sb-r">▮▮▮  🔋</span></div>
+        <div class="m3-header">
+          <button class="circ" aria-label="menu">☰</button>
+          <button class="circ" aria-label="back">‹</button>
+          <div class="m3-titles">
+            <div class="t1">Navimow mow completion…</div>
+            <div class="t2">hermes-agent</div>
+          </div>
+          <button class="circ" aria-label="compose">✎</button>
+          <button class="circ" aria-label="more">⋯</button>
+        </div>
+        <div class="m3-scroll">
+          <div class="soft-stuck">Needs you · disconnected mid-turn</div>
+          <div class="quote">
+            “Check why zone completion isn’t trusted and what telemetry we still have.”
+          </div>
+          <div class="body-text">
+            <div class="tl">TL;DR:</div>
+            <p><strong>Summary:</strong> The problem is lack of trustworthy mow-day completion, not lack of another mower dashboard.</p>
+            <p><strong>Best case:</strong> Prove every intended zone was completed without watching the mower.</p>
+            <p><strong>Worst case:</strong> Limited or stale Navimow telemetry means we can only report that completion is unverified.</p>
+            <p><strong>Most likely:</strong> Catch missed starts, interrupted sessions, and unfinished zones, then guide recovery.</p>
+            <p><strong>Next:</strong> Nudge the host agent to re-check telemetry sources, then wait for a short status back on your phone.</p>
+          </div>
+        </div>
+        <div class="m3-bottom">
+          <div class="work-bar">
+            <button class="plus" type="button">+</button>
+            <div class="placeholder">Work on hermes-agent</div>
+            <button class="mic" type="button" aria-label="voice">🎙</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

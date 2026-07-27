@@ -12,6 +12,8 @@ import { installVersionFooter } from './lib/version-footer.js';
 import { SYSTEM_PAGES, getSystemPage } from './views/system/index.js';
 import { iconHtml } from './lib/icons.js';
 import { installAuthGate } from './lib/auth-gate.js';
+import { mountRemoteShell } from './remote/app.js';
+import './remote/remote.css';
 
 interface Agent {
   id: string;
@@ -332,7 +334,38 @@ function mountDashboard(): void {
   renderRoute();
 }
 
+function wantsAdvancedConsole(): boolean {
+  const h = (location.hash || '').replace(/^#/, '');
+  const parts = h.split('/').filter(Boolean);
+  if (parts[0] === 'advanced') return true;
+  // Explicit deep links into legacy console
+  if (parts[0] === 'agents' || parts[0] === 'settings') return true;
+  if (parts[0] && SYSTEM_AREAS.has(parts[0])) return true;
+  return false;
+}
+
+function wantsRemoteShell(): boolean {
+  // Default product: phone Remote (ChatGPT Remote–style).
+  // Legacy console only via #/advanced or deep legacy routes.
+  return !wantsAdvancedConsole();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  if (wantsRemoteShell()) {
+    document.body.classList.add('rr-mode');
+    // Normalize empty / home hash to #/remote
+    if (!location.hash || location.hash === '#' || location.hash === '#/') {
+      location.replace('#/remote');
+    }
+    const host = document.getElementById('app');
+    if (host) {
+      installAuthGate();
+      mountRemoteShell(host);
+    }
+    registerPwa();
+    return;
+  }
+
   void pingHello();
   setInterval(() => { void pingHello(); }, 10000);
 

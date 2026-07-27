@@ -36,6 +36,7 @@ import {
   type UpdateStepEvent,
 } from './lib/version-update.js';
 import { loadAuthConfig, checkAuth, logAuthStartup, publicAuthInfo, type AuthConfig } from './lib/auth.js';
+import { handleRemote, setRemoteDeps } from './lib/routes/remote.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -72,6 +73,7 @@ const MIME: Record<string, string> = {
 
 const manager = new AgentManager();
 setSessionsManager(manager);
+setRemoteDeps(manager, AUTH_CFG);
 
 interface TailscaleIdentity {
   backend: string;
@@ -1385,6 +1387,18 @@ const server = http.createServer(async (req: IncomingMessage, res: ServerRespons
     }
   }
 
+  if (url.startsWith('/api/remote')) {
+    try {
+      const handled = await handleRemote(req, res, url, method);
+      if (handled) return;
+    } catch (err) {
+      if (!res.headersSent) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendJson(res, 500, { ok: false, error: msg });
+      }
+      return;
+    }
+  }
   if (url.startsWith('/api/system/')) {
     try {
       await handleSystem(req, res, url);

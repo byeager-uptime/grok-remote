@@ -694,11 +694,11 @@ export class AgentManager extends EventEmitter {
   /** Pull recent host sessions into the agents sidebar (no auto-connect). */
   async syncHostSessions(limit: number = 40): Promise<{ imported: number; total: number; agents: PublicAgent[] }> {
     const { listHostSessions } = await import('./session-index.js');
-    const { items } = await listHostSessions({ limit });
+    // Main sessions only — never import subagents into the phone list.
+    const { items } = await listHostSessions({ limit, includeSubagents: false });
     let imported = 0;
     for (const s of items) {
       if (s.isSubagent) continue;
-      // Skip empty/tiny noise sessions without a real title when possible? Keep all CLI rows.
       const before = this.agents.size;
       await this.importHostSession({
         sessionId: s.sessionId,
@@ -708,6 +708,15 @@ export class AgentManager extends EventEmitter {
         seedHistory: true,
       });
       if (this.agents.size > before) imported++;
+    }
+    // Drop agents that are pure subagent imports from older buggy syncs.
+    const { collectSubagentIds } = await import('./session-index.js');
+    const subIds = collectSubagentIds();
+    for (const a of [...this.agents.values()]) {
+      const sid = a.lastSessionId || a.id;
+      if (subIds.has(sid)) {
+        try { await this.kill(a.id); } catch { /* ignore */ }
+      }
     }
     return { imported, total: items.length, agents: this.list() };
   }

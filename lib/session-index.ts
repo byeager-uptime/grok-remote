@@ -111,9 +111,40 @@ function readSummary(sessionDir: string): Partial<HostSession> | null {
   }
 }
 
+/**
+ * Collect every session id that appears under a `subagents/` directory.
+ * Those are child research/worker runs and must not show in the main phone list.
+ */
+export function collectSubagentIds(): Set<string> {
+  const root = sessionsRoot();
+  const ids = new Set<string>();
+  let cwdKeys: string[] = [];
+  try {
+    cwdKeys = fs.readdirSync(root).filter((n) => !n.endsWith('.sqlite'));
+  } catch {
+    return ids;
+  }
+  for (const enc of cwdKeys) {
+    const cwdDir = path.join(root, enc);
+    let parents: string[] = [];
+    try { parents = fs.readdirSync(cwdDir); } catch { continue; }
+    for (const parent of parents) {
+      if (!UUID_RE.test(parent)) continue;
+      const subRoot = path.join(cwdDir, parent, 'subagents');
+      let kids: string[] = [];
+      try { kids = fs.readdirSync(subRoot); } catch { continue; }
+      for (const kid of kids) {
+        if (UUID_RE.test(kid)) ids.add(kid);
+      }
+    }
+  }
+  return ids;
+}
+
 /** Walk ~/.grok/sessions for top-level session dirs (not under subagents/). */
 export function listFromDisk(): HostSession[] {
   const root = sessionsRoot();
+  const subIds = collectSubagentIds();
   const out: HostSession[] = [];
   let cwdKeys: string[] = [];
   try {
@@ -133,6 +164,8 @@ export function listFromDisk(): HostSession[] {
     try { entries = fs.readdirSync(cwdDir); } catch { continue; }
     for (const name of entries) {
       if (!UUID_RE.test(name)) continue;
+      // Even if a subagent was also mirrored as a top-level dir, hide it.
+      if (subIds.has(name)) continue;
       const sessionDir = path.join(cwdDir, name);
       try {
         if (!fs.statSync(sessionDir).isDirectory()) continue;
@@ -236,6 +269,9 @@ export async function listHostSessions(opts: ListHostSessionsOpts = {}): Promise
   const limit = Math.min(Math.max(opts.limit || 50, 1), 200);
   const q = (opts.q || '').trim().toLowerCase();
 
+  const subIds = collectSubagentIds();
+  const includeSubs = !!opts.includeSubagents;
+
   const [cli, disk, sqlite] = await Promise.all([
     listFromCli(Math.max(limit, 100), opts.q || ''),
     Promise.resolve(listFromDisk()),
@@ -244,9 +280,11 @@ export async function listHostSessions(opts: ListHostSessionsOpts = {}): Promise
 
   const byId = new Map<string, HostSession>();
   const merge = (s: HostSession): void => {
+    const isSub = s.isSubagent || subIds.has(s.sessionId);
+    if (isSub && !includeSubs) return;
     const prev = byId.get(s.sessionId);
     if (!prev) {
-      byId.set(s.sessionId, { ...s, source: s.source });
+      byId.set(s.sessionId, { ...s, isSubagent: isSub, source: s.source });
       return;
     }
     // Prefer non-empty fields; prefer disk titles/cwd; keep newest updated.
@@ -261,7 +299,7 @@ export async function listHostSessions(opts: ListHostSessionsOpts = {}): Promise
         '(no summary)',
       cwd: s.cwd || prev.cwd,
       source: 'merged',
-      isSubagent: prev.isSubagent || s.isSubagent,
+      isSubagent: prev.isSubagent || isSub,
       numMessages: s.numMessages ?? prev.numMessages,
       model: s.model || prev.model,
       local: prev.local || s.local,
@@ -272,7 +310,7 @@ export async function listHostSessions(opts: ListHostSessionsOpts = {}): Promise
   for (const s of disk) merge(s);
   for (const s of sqlite) merge(s);
 
-  let items = [...byId.values()];
+  let items = [...byId.values()].filter((s) => includeSubs || !s.isSubagent);
   if (q) {
     items = items.filter((s) =>
       s.sessionId.toLowerCase().includes(q) ||
