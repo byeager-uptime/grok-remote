@@ -388,13 +388,23 @@ body.rr-kb #rr-thread-body.rr-scroll {
 }
 .rr-proj-ext svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.75; }
 
+/* Session row: [open thread] + [pin] */
+.rr-thread-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+.rr-thread-row--pinned .rr-thread-t { font-weight: 500; }
 .rr-thread {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   max-width: 100%;
-  padding: 11px 8px 11px 26px;
+  padding: 11px 4px 11px 10px;
   background: transparent;
   border: none;
   color: var(--rr-fg);
@@ -416,6 +426,46 @@ body.rr-kb #rr-thread-body.rr-scroll {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.rr-ago {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: #6b6b6b;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  min-width: 1.8em;
+  text-align: right;
+  padding-left: 6px;
+}
+.rr-pin-mark {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  color: #f5c542;
+  font-size: 12px;
+  line-height: 1;
+}
+.rr-pin-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 44px;
+  border: none;
+  background: transparent;
+  color: #555;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 10px;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  padding: 0;
+}
+.rr-pin-btn--on { color: #f5c542; }
+.rr-pin-btn:active { background: var(--rr-elevated); }
+.rr-section-label--pin {
+  color: #f5c542;
+  margin-top: 4px;
 }
 
 /* Tiny status dots only (ChatGPT has no loud chips) */

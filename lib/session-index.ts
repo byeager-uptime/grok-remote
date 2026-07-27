@@ -91,8 +91,9 @@ function readSummary(sessionDir: string): Partial<HostSession> | null {
       current_model_id?: string;
       info?: { id?: string; cwd?: string };
     };
-    const created = (j.created_at || '').slice(0, 10);
-    const updated = (j.last_active_at || j.updated_at || '').slice(0, 10);
+    // Keep full ISO for relative time in Remote UI (was date-only → always "today").
+    const created = j.created_at || '';
+    const updated = j.last_active_at || j.updated_at || created;
     return {
       sessionId: j.info?.id,
       cwd: j.info?.cwd || '',
@@ -174,7 +175,10 @@ export function listFromDisk(): HostSession[] {
       const fromSum = readSummary(sessionDir);
       let mtime = '';
       try {
-        mtime = fs.statSync(sessionDir).mtime.toISOString().slice(0, 10);
+        // Prefer chat_history mtime — reflects last CLI turn better than dir mtime
+        const hist = path.join(sessionDir, 'chat_history.jsonl');
+        if (fs.existsSync(hist)) mtime = fs.statSync(hist).mtime.toISOString();
+        else mtime = fs.statSync(sessionDir).mtime.toISOString();
       } catch { /* ignore */ }
 
       out.push({

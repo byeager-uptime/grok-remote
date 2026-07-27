@@ -645,14 +645,51 @@ export class AgentManager extends EventEmitter {
     }
   }
 
+  /**
+   * Re-read host chat_history.jsonl into agent history so CLI SSH turns
+   * show up in the phone Remote UI after the user typed outside grok-remote.
+   */
+  async reseedFromHost(sessionId: string): Promise<{ ok: true; seeded: number; agentId: string }> {
+    if (!sessionId) throw new Error('sessionId required');
+    const { findSessionDir, seedHistoryFromSession } = await import('./session-index.js');
+    const sessionDir = findSessionDir(sessionId);
+    if (!sessionDir) throw new Error('no local session dir — cannot reseed from host');
+
+    // Ensure agent shell exists (disconnected ok)
+    const pub = await this.importHostSession({
+      sessionId,
+      connect: false,
+      seedHistory: false,
+    });
+    const agentId = pub.id;
+    const hp = historyPath(agentId);
+    // Keep only agent_created so we fully replay CLI transcript
+    let createdLine = '';
+    try {
+      const raw = fs.readFileSync(hp, 'utf8');
+      for (const line of raw.split('\n')) {
+        if (line.includes('"agent_created"')) { createdLine = line.trim() + '\n'; break; }
+      }
+    } catch { /* empty */ }
+    try {
+      fs.writeFileSync(hp, createdLine || '');
+    } catch (err) {
+      throw new Error(`failed to reset history: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const seeded = seedHistoryFromSession(sessionDir, agentId, (id, rec) => historyAppend(id, rec));
+    return { ok: true, seeded, agentId };
+  }
+
   async importHostSession(opts: {
     sessionId: string;
     name?: string;
     cwd?: string;
     connect?: boolean;
     seedHistory?: boolean;
+    /** When true, re-import host transcript even if agent history already has turns. */
+    forceReseed?: boolean;
   }): Promise<PublicAgent> {
-    const { sessionId, connect = false, seedHistory = true } = opts;
+    const { sessionId, connect = false, seedHistory = true, forceReseed = false } = opts;
     if (!sessionId) throw new Error('sessionId required');
 
     const { findSessionDir, seedHistoryFromSession } = await import('./session-index.js');
@@ -660,6 +697,20 @@ export class AgentManager extends EventEmitter {
 
     const ensureSeed = (agentId: string): number => {
       if (!seedHistory || !sessionDir) return 0;
+      if (forceReseed) {
+        // Reset to agent_created only, then full seed from CLI disk
+        try {
+          const hp = historyPath(agentId);
+          let createdLine = '';
+          try {
+            for (const line of fs.readFileSync(hp, 'utf8').split('\n')) {
+              if (line.includes('"agent_created"')) { createdLine = line.trim() + '\n'; break; }
+            }
+          } catch { /* empty */ }
+          fs.writeFileSync(hp, createdLine || '');
+        } catch { /* continue */ }
+        return seedHistoryFromSession(sessionDir, agentId, (id, rec) => historyAppend(id, rec));
+      }
       if (!this._historyNeedsSeed(agentId)) return 0;
       return seedHistoryFromSession(sessionDir, agentId, (id, rec) => historyAppend(id, rec));
     };

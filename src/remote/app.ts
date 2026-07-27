@@ -16,11 +16,13 @@ interface RemoteSession {
   status: 'running' | 'waiting' | 'stuck' | 'done';
   updated: string;
   created: string;
+  updatedAtMs?: number;
   source: string;
   local: boolean;
   model?: string;
   agentId?: string | null;
   connected?: boolean;
+  pinned?: boolean;
 }
 
 interface ProjectGroup {
@@ -34,8 +36,30 @@ interface ProjectGroup {
 interface SessionsResponse {
   ok: boolean;
   stuckCount?: number;
+  pinnedCount?: number;
   projects?: ProjectGroup[];
+  pinned?: RemoteSession[];
   error?: string;
+}
+
+/**
+ * Compact relative time: at most 2 digits + 1 unit letter.
+ * 45s · 12m · 5h · 3d · 2w · 1y
+ */
+function formatAgo(ms: number | undefined | null): string {
+  if (!ms || !Number.isFinite(ms) || ms <= 0) return '';
+  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (sec < 60) return `${Math.min(99, Math.max(1, sec))}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${Math.min(99, min)}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${Math.min(99, hr)}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 14) return `${Math.min(99, day)}d`;
+  const week = Math.floor(day / 7);
+  if (week < 52) return `${Math.min(99, week)}w`;
+  const year = Math.floor(day / 365);
+  return `${Math.min(99, Math.max(1, year))}y`;
 }
 
 type Route =
@@ -243,6 +267,7 @@ export class RemoteApp {
   root: HTMLElement;
   hostLabel = 'hermes-agent';
   projects: ProjectGroup[] = [];
+  pinned: RemoteSession[] = [];
   stuckCount = 0;
   loading = false;
   error: string | null = null;
@@ -428,6 +453,12 @@ export class RemoteApp {
       if (parseRoute().name !== 'thread') return;
       if (this._sending || this._liveAsstText) return; // don't clobber live stream mid-token
       try {
+        // Re-import CLI/SSH turns that landed on disk while phone was open
+        if (reason === 'poll' || reason === 'visibility') {
+          try {
+            await apiPost(`/api/remote/sessions/${encodeURIComponent(agentId)}/reseed`, {});
+          } catch { /* no local dir */ }
+        }
         const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
           headers: { accept: 'application/x-ndjson' },
         });
@@ -482,9 +513,52 @@ export class RemoteApp {
         ...g,
         projectLabel: cleanLabel(g.projectLabel),
       }));
+      this.pinned = data.pinned || [];
       this.stuckCount = data.stuckCount || 0;
       this.error = null;
     } catch { /* keep last good list */ }
+  }
+
+  async togglePin(sessionId: string, next: boolean): Promise<void> {
+    try {
+      await apiPost(`/api/remote/sessions/${encodeURIComponent(sessionId)}/pin`, { pinned: next });
+      await this.loadSessionsQuiet();
+      if (parseRoute().name === 'home') this.renderHome();
+      this.toast(next ? 'Pinned — Working on' : 'Unpinned');
+    } catch (e) {
+      this.toast(e instanceof Error ? e.message : 'Pin failed');
+    }
+  }
+
+  private renderSessionRow(s: RemoteSession, scroll: HTMLElement): void {
+    const row = el('div', { class: `rr-thread-row${s.pinned ? ' rr-thread-row--pinned' : ''}` });
+    const thr = el('button', { class: 'rr-thread', type: 'button' }) as HTMLButtonElement;
+    thr.onclick = () => navigate(`#/remote/s/${encodeURIComponent(s.sessionId)}`);
+    // Left: status dot (or star when pinned)
+    if (s.pinned) {
+      thr.appendChild(el('span', { class: 'rr-pin-mark', 'aria-hidden': 'true' }, '★'));
+    } else {
+      thr.appendChild(el('span', { class: `rr-st rr-st--${s.status}` }));
+    }
+    thr.appendChild(el('span', { class: 'rr-thread-t' }, s.title));
+    const ago = formatAgo(s.updatedAtMs);
+    if (ago) thr.appendChild(el('span', { class: 'rr-ago' }, ago));
+    row.appendChild(thr);
+
+    // Pin control — separate hit target, does not open thread
+    const pinBtn = el('button', {
+      class: `rr-pin-btn${s.pinned ? ' rr-pin-btn--on' : ''}`,
+      type: 'button',
+      'aria-label': s.pinned ? 'Unpin session' : 'Pin session',
+      title: s.pinned ? 'Unpin' : 'Pin as working on',
+    }, s.pinned ? '★' : '☆') as HTMLButtonElement;
+    pinBtn.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      void this.togglePin(s.sessionId, !s.pinned);
+    };
+    row.appendChild(pinBtn);
+    scroll.appendChild(row);
   }
 
   private stopListPoll(): void {
@@ -528,10 +602,12 @@ export class RemoteApp {
         ...g,
         projectLabel: cleanLabel(g.projectLabel),
       }));
+      this.pinned = data.pinned || [];
       this.stuckCount = data.stuckCount || 0;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
       this.projects = [];
+      this.pinned = [];
     } finally {
       this.loading = false;
     }
@@ -681,6 +757,8 @@ export class RemoteApp {
       if (cloudS.length) cloudGroups.push({ ...g, sessions: cloudS });
     }
 
+    const pinnedFiltered = this.pinned.filter(filterSession);
+
     const renderGroups = (groups: G[], prefix: string): void => {
       for (const g of groups) {
         const collapseKey = `${prefix}:${g.projectId}`;
@@ -710,15 +788,15 @@ export class RemoteApp {
         scroll.appendChild(row);
 
         if (collapsed) continue;
-        for (const s of g.sessions) {
-          const thr = el('button', { class: 'rr-thread', type: 'button' }) as HTMLButtonElement;
-          thr.onclick = () => navigate(`#/remote/s/${encodeURIComponent(s.sessionId)}`);
-          thr.appendChild(el('span', { class: `rr-st rr-st--${s.status}` }));
-          thr.appendChild(el('span', { class: 'rr-thread-t' }, s.title));
-          scroll.appendChild(thr);
-        }
+        for (const s of g.sessions) this.renderSessionRow(s, scroll);
       }
     };
+
+    // Working on / pinned — always first when present
+    if (pinnedFiltered.length && !this.loading) {
+      scroll.appendChild(el('div', { class: 'rr-section-label rr-section-label--pin' }, 'Working on'));
+      for (const s of pinnedFiltered) this.renderSessionRow(s, scroll);
+    }
 
     if (this.loading && !this.projects.length) {
       scroll.appendChild(el('div', { class: 'rr-muted' }, 'Loading…'));
@@ -945,12 +1023,14 @@ export class RemoteApp {
     let title = sessionId.slice(0, 8);
     let listStatus: RemoteSession['status'] | null = null;
     let isLocalList = true;
+    let isPinned = this.pinned.some((p) => p.sessionId === sessionId);
     for (const g of this.projects) {
       const hit = g.sessions.find((s) => s.sessionId === sessionId);
       if (hit) {
         title = hit.title;
         listStatus = hit.status;
         isLocalList = hit.local !== false;
+        if (hit.pinned) isPinned = true;
         break;
       }
     }
@@ -976,6 +1056,10 @@ export class RemoteApp {
         {
           label: 'Refresh conversation',
           action: () => { void softRefresh(); },
+        },
+        {
+          label: isPinned ? 'Unpin from Working on' : 'Pin as Working on',
+          action: () => { void this.togglePin(sessionId, !isPinned); },
         },
         { label: 'New task', action: () => navigate('#/remote/new') },
         {
@@ -1045,6 +1129,10 @@ export class RemoteApp {
     const softRefresh = async (): Promise<void> => {
       if (!agentId) return;
       try {
+        // Pull latest CLI/SSH turns from host disk into remote history first
+        try {
+          await apiPost(`/api/remote/sessions/${encodeURIComponent(sessionId)}/reseed`, {});
+        } catch { /* cloud-only or no dir — ignore */ }
         const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
           headers: { accept: 'application/x-ndjson' },
         });
@@ -1053,12 +1141,10 @@ export class RemoteApp {
         this._lastHistFingerprint = `${raw.length}:${raw.slice(-200)}`;
         const turns = parseHistoryTurns(raw);
         this.paintTurns(scroll, turns, { skipQuote: turns.length <= 1 });
-        // Ensure bottom pull affordance remains
         if (!scroll.querySelector('.rr-ptr--bottom')) {
           this.attachPullToRefresh(scroll, softRefresh, 'up');
         }
         requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
-        // Re-bind stream after refresh
         this.connectStream(agentId, scroll);
         this.startThreadSync(agentId, scroll);
         this.toast('Conversation refreshed');
@@ -1126,6 +1212,24 @@ export class RemoteApp {
       requestAnimationFrame(() => {
         scroll.scrollTop = scroll.scrollHeight;
       });
+
+      // Pull any CLI turns written after last import (SSH while phone was closed)
+      try {
+        await apiPost(`/api/remote/sessions/${encodeURIComponent(sessionId)}/reseed`, {});
+        const hist2 = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
+          headers: { accept: 'application/x-ndjson' },
+        });
+        if (hist2.ok) {
+          const raw2 = await hist2.text();
+          this._lastHistFingerprint = `${raw2.length}:${raw2.slice(-200)}`;
+          this.paintTurns(scroll, parseHistoryTurns(raw2), {
+            stuckLabel,
+            infoBanner,
+            skipQuote: true,
+          });
+          requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
+        }
+      } catch { /* keep seeded history */ }
 
       // Live token stream + background history sync for long-lived PWA tabs
       this.connectStream(agentId, scroll);

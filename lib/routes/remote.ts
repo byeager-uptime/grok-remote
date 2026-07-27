@@ -15,6 +15,7 @@ import { deriveSessionStatus, type SessionTriageStatus } from '../session-status
 import type { AgentManager, PublicAgent } from '../agent-manager.js';
 import { publicAuthInfo, type AuthConfig } from '../auth.js';
 import { tailscaleIdentity } from './remote-host.js';
+import { isPinned, listPins, setPinned } from '../remote-pins.js';
 
 let manager: AgentManager | null = null;
 let authCfg: AuthConfig | null = null;
@@ -37,11 +38,21 @@ interface RemoteSessionRow {
   status: SessionTriageStatus;
   updated: string;
   created: string;
+  /** Epoch ms for relative time ("5m", "12h"). */
+  updatedAtMs: number;
   source: string;
   local: boolean;
   model?: string;
   agentId?: string | null;
   connected?: boolean;
+  /** Manual "working on" pin for phone triage. */
+  pinned: boolean;
+}
+
+function toMs(iso: string | null | undefined): number {
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : 0;
 }
 
 function agentBySession(sessionId: string): PublicAgent | null {
@@ -80,9 +91,9 @@ function toRow(s: HostSession): RemoteSessionRow {
   const project = projectForCwd(s.cwd);
   const agent = agentBySession(s.sessionId);
   const live = !!agent?.connected;
-  // Host session timestamps only — never agent import time (that made every
-  // cloud remote look "stuck" after syncHostSessions).
+  // Prefer live agent activity when connected; else host disk timestamps.
   const hostActivity = s.updated || s.created || null;
+  const activityIso = live && agent?.lastSeen ? agent.lastSeen : hostActivity;
   const triage = deriveSessionStatus({
     connected: live,
     inFlight: agent?.inFlight,
@@ -102,11 +113,13 @@ function toRow(s: HostSession): RemoteSessionRow {
     status: triage,
     updated: s.updated,
     created: s.created,
+    updatedAtMs: toMs(activityIso) || toMs(s.created),
     source: s.source,
     local: s.local,
     model: s.model || agent?.model || undefined,
     agentId: agent?.id || null,
     connected: live,
+    pinned: isPinned(s.sessionId) || !!agent?.starred,
   };
 }
 
@@ -150,21 +163,27 @@ export async function handleRemote(
       // listHostSessions already main-only after our filter
       const statusRank: Record<string, number> = { stuck: 0, running: 1, waiting: 2, done: 3 };
       const rows = items.filter((s) => !s.isSubagent).map(toRow);
-      // Within each project, triage status then recency
+      const sortSessions = (a: RemoteSessionRow, b: RemoteSessionRow): number => {
+        // Pinned first, then status, then most recently touched
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        const ra = statusRank[a.status] ?? 9;
+        const rb = statusRank[b.status] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
+      };
+      // Within each project, pinned → triage → recency
       const groups = groupSessionsByProject(rows).map((g) => ({
         projectId: g.project.id,
         projectLabel: g.project.label,
         cwd: g.project.cwd,
         isGit: g.project.isGit,
-        sessions: [...g.sessions].sort((a, b) => {
-          const ra = statusRank[a.status] ?? 9;
-          const rb = statusRank[b.status] ?? 9;
-          if (ra !== rb) return ra - rb;
-          return String(b.updated || '').localeCompare(String(a.updated || ''));
-        }),
+        sessions: [...g.sessions].sort(sortSessions),
       }));
-      // Sort groups: any stuck first, then by whether local, then label
+      // Sort groups: any pinned, then stuck, then local, then label
       groups.sort((a, b) => {
+        const aPin = a.sessions.some((s) => s.pinned) ? 0 : 1;
+        const bPin = b.sessions.some((s) => s.pinned) ? 0 : 1;
+        if (aPin !== bPin) return aPin - bPin;
         const aStuck = a.sessions.some((s) => s.status === 'stuck') ? 0 : 1;
         const bStuck = b.sessions.some((s) => s.status === 'stuck') ? 0 : 1;
         if (aStuck !== bStuck) return aStuck - bStuck;
@@ -174,15 +193,60 @@ export async function handleRemote(
         return a.projectLabel.localeCompare(b.projectLabel);
       });
       const stuckCount = rows.filter((r) => r.status === 'stuck').length;
+      const pinned = rows.filter((r) => r.pinned).sort(sortSessions);
       sendJson(res, 200, {
         ok: true,
         sources,
         stuckCount,
+        pinnedCount: pinned.length,
         count: rows.length,
         sessions: rows,
+        pinned,
         projects: groups,
         raw: raw.slice(0, 2000),
       });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  // Pin / unpin a session for the phone "Working on" triage list
+  const pinMatch = url.match(/^\/api\/remote\/sessions\/([^/]+)\/pin$/);
+  if (pinMatch && method === 'POST') {
+    const sessionId = decodeURIComponent(pinMatch[1] || '');
+    let body: { pinned?: boolean } = {};
+    try { body = (await readJsonBody(req)) as typeof body; } catch { /* empty */ }
+    try {
+      const pinned = typeof body.pinned === 'boolean' ? body.pinned : !isPinned(sessionId);
+      const result = setPinned(sessionId, pinned);
+      // Mirror onto agent meta when an agent shell exists
+      if (manager) {
+        const a = agentBySession(sessionId);
+        if (a) {
+          try {
+            await manager.update(a.id, { starred: result.pinned });
+          } catch { /* non-fatal */ }
+        }
+      }
+      sendJson(res, 200, { ok: true, ...result, pins: listPins() });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  // Re-read CLI/host chat_history into Remote history (SSH turns while phone is open)
+  const reseedMatch = url.match(/^\/api\/remote\/sessions\/([^/]+)\/reseed$/);
+  if (reseedMatch && method === 'POST') {
+    if (!manager) {
+      sendJson(res, 500, { ok: false, error: 'manager not ready' });
+      return true;
+    }
+    const sessionId = decodeURIComponent(reseedMatch[1] || '');
+    try {
+      const result = await manager.reseedFromHost(sessionId);
+      sendJson(res, 200, result);
     } catch (err) {
       sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
