@@ -793,6 +793,16 @@ body.rr-kb #rr-thread-body.rr-scroll {
   text-transform: none;
   margin-bottom: 4px;
 }
+.rr-img {
+  display: block;
+  max-width: min(100%, 360px);
+  width: auto;
+  height: auto;
+  border-radius: 12px;
+  margin: 10px 0;
+  background: #111;
+  border: 1px solid #2a2a2a;
+}
 
 /* Composer — ChatGPT Remote: single pill, flush to bottom/keyboard */
 .rr-work-wrap {

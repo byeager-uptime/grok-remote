@@ -1,6 +1,8 @@
 // Phone Remote API — main sessions only, project groups, open/resume/new task.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import os from 'node:os';
 
 import { send, readJsonBody } from './helpers.js';
@@ -234,6 +236,58 @@ export async function handleRemote(
       sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
     return true;
+  }
+
+  // Serve a file from the host session dir (images generated in CLI chat, etc.)
+  // GET /api/remote/sessions/:id/file?path=images/6.jpg
+  {
+    const u = new URL(req.url || '/', 'http://x');
+    const fileMatch = u.pathname.match(/^\/api\/remote\/sessions\/([^/]+)\/file$/);
+    if (fileMatch && method === 'GET') {
+      const sessionId = decodeURIComponent(fileMatch[1] || '');
+      const rel = String(u.searchParams.get('path') || '').trim();
+      if (!rel || rel.includes('..') || path.isAbsolute(rel)) {
+        sendJson(res, 400, { ok: false, error: 'invalid path' });
+        return true;
+      }
+      // Only allow simple relative paths under the session dir (images/, etc.)
+      if (!/^[A-Za-z0-9._/-]+$/.test(rel) || rel.startsWith('/')) {
+        sendJson(res, 400, { ok: false, error: 'invalid path' });
+        return true;
+      }
+      try {
+        const sessionDir = findSessionDir(sessionId);
+        if (!sessionDir) {
+          sendJson(res, 404, { ok: false, error: 'session not found' });
+          return true;
+        }
+        const target = path.resolve(sessionDir, rel);
+        if (!target.startsWith(path.resolve(sessionDir) + path.sep)) {
+          sendJson(res, 400, { ok: false, error: 'path escapes session' });
+          return true;
+        }
+        if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+          sendJson(res, 404, { ok: false, error: 'file not found' });
+          return true;
+        }
+        const ext = path.extname(target).toLowerCase();
+        const mime =
+          ext === '.png' ? 'image/png'
+            : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+              : ext === '.gif' ? 'image/gif'
+                : ext === '.webp' ? 'image/webp'
+                  : ext === '.svg' ? 'image/svg+xml'
+                    : 'application/octet-stream';
+        res.writeHead(200, {
+          'content-type': mime,
+          'cache-control': 'private, max-age=3600',
+        });
+        fs.createReadStream(target).pipe(res);
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+      return true;
+    }
   }
 
   // Re-read CLI/host chat_history into Remote history (SSH turns while phone is open)

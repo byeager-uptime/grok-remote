@@ -140,8 +140,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/** Escape + light markdown → HTML (headings, bold, code, lists, tables, links). */
-function formatMessage(text: string): string {
+/** Escape + light markdown → HTML (headings, bold, code, lists, tables, images, links). */
+function formatMessage(text: string, opts?: { sessionId?: string }): string {
   let s = String(text || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -152,6 +152,20 @@ function formatMessage(text: string): string {
     `<pre class="rr-code">${code.replace(/^\n|\n$/g, '')}</pre>`);
   // inline code
   s = s.replace(/`([^`\n]+)`/g, '<code class="rr-icode">$1</code>');
+  // images ![alt](src) — resolve session-relative paths (images/6.jpg) via Remote API
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt: string, src: string) => {
+    let url = src;
+    if (
+      opts?.sessionId &&
+      !/^https?:\/\//i.test(src) &&
+      !src.startsWith('data:') &&
+      !src.startsWith('/')
+    ) {
+      url = `/api/remote/sessions/${encodeURIComponent(opts.sessionId)}/file?path=${encodeURIComponent(src)}`;
+    }
+    const safeAlt = alt.replace(/"/g, '&quot;');
+    return `<img class="rr-img" src="${url}" alt="${safeAlt}" loading="lazy" decoding="async">`;
+  });
   // bold / italic / strikethrough
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
@@ -197,7 +211,12 @@ function formatMessage(text: string): string {
   );
   // paragraphs: double newlines
   s = s.split(/\n{2,}/).map((p) => {
-    if (/^<(pre|div|ul|table|hr)/.test(p.trim()) || p.includes('rr-table') || p.includes('rr-hr')) {
+    if (
+      /^<(pre|div|ul|table|hr|img)/.test(p.trim()) ||
+      p.includes('rr-table') ||
+      p.includes('rr-hr') ||
+      p.includes('rr-img')
+    ) {
       return p;
     }
     return `<p>${p.replace(/\n/g, '<br>')}</p>`;
@@ -209,14 +228,14 @@ function userBubble(text: string): HTMLElement {
   return el('div', { class: 'rr-msg-user' }, text.slice(0, 4000));
 }
 
-function asstBubble(text: string, opts?: { showWho?: boolean }): HTMLElement {
+function asstBubble(text: string, opts?: { showWho?: boolean; sessionId?: string }): HTMLElement {
   const box = el('div', { class: 'rr-msg-asst' });
   // ChatGPT is quiet — only label the first assistant turn in a streak
   if (opts?.showWho !== false) {
     box.appendChild(el('div', { class: 'rr-who' }, 'Grok'));
   }
   const body = el('div', { class: 'rr-body' }) as HTMLElement;
-  body.innerHTML = formatMessage(text.slice(0, 16000));
+  body.innerHTML = formatMessage(text.slice(0, 16000), { sessionId: opts?.sessionId });
   box.appendChild(body);
   return box;
 }
@@ -405,6 +424,8 @@ export class RemoteApp {
    * like nightok+sendbtn-ok → "nightoksendbtn-ok".
    */
   private _acceptStream = false;
+  /** Current thread session id — used to resolve images/6.jpg etc. */
+  private _threadSessionId: string | null = null;
 
   constructor() {
     this.root = el('div', { class: 'rr-app' });
@@ -696,6 +717,7 @@ export class RemoteApp {
     this._seedAsstTail = '';
     this._streamPriming = false;
     this._acceptStream = false;
+    // keep _threadSessionId — soft reconnect still needs image URL resolution
   }
 
   async bootstrap(): Promise<void> {
@@ -1020,12 +1042,13 @@ export class RemoteApp {
       ));
     } else {
       let lastRole: 'user' | 'asst' | null = null;
+      const sid = this._threadSessionId || undefined;
       for (const t of turns) {
         if (t.role === 'user') {
           scroll.appendChild(userBubble(t.text));
         } else {
           // Quiet ChatGPT-style: "Grok" only on first asst after a user
-          scroll.appendChild(asstBubble(t.text, { showWho: lastRole !== 'asst' }));
+          scroll.appendChild(asstBubble(t.text, { showWho: lastRole !== 'asst', sessionId: sid }));
         }
         lastRole = t.role;
       }
@@ -1065,12 +1088,13 @@ export class RemoteApp {
     }
     this._liveAsstText += chunk;
     this._turnGotAsst = true;
+    const sid = this._threadSessionId || undefined;
     if (!this._liveAsstEl) {
-      this._liveAsstEl = asstBubble(this._liveAsstText, { showWho: true });
+      this._liveAsstEl = asstBubble(this._liveAsstText, { showWho: true, sessionId: sid });
       this.insertBeforeBottomPtr(scroll, this._liveAsstEl);
     } else {
       const body = this._liveAsstEl.querySelector('.rr-body') as HTMLElement | null;
-      if (body) body.innerHTML = formatMessage(this._liveAsstText.slice(0, 16000));
+      if (body) body.innerHTML = formatMessage(this._liveAsstText.slice(0, 16000), { sessionId: sid });
     }
     scroll.scrollTop = scroll.scrollHeight;
   }
@@ -1175,6 +1199,7 @@ export class RemoteApp {
     // a full shell → triple headers/composers (user dogfood screenshot).
     this.closeStream();
     this.root.replaceChildren();
+    this._threadSessionId = sessionId;
 
     let title = sessionId.slice(0, 8);
     let listStatus: RemoteSession['status'] | null = null;
