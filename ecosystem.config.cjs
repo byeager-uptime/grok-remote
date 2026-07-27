@@ -37,10 +37,18 @@ const HOST =
   fileEnv.GROK_REMOTE_HOST ||
   '127.0.0.1';
 
-const GROK_REMOTE_TOKEN_FILE =
-  process.env.GROK_REMOTE_TOKEN_FILE ||
-  fileEnv.GROK_REMOTE_TOKEN_FILE ||
-  (fs.existsSync(defaultTokenFile) ? defaultTokenFile : '');
+// Only wire token file when auth mode asks for tokens.
+const authMode = (process.env.GROK_REMOTE_AUTH || fileEnv.GROK_REMOTE_AUTH || 'auto').toLowerCase();
+const tokenRequired =
+  process.env.GROK_REMOTE_TOKEN_REQUIRED === '1' ||
+  fileEnv.GROK_REMOTE_TOKEN_REQUIRED === '1' ||
+  authMode === 'token';
+
+const GROK_REMOTE_TOKEN_FILE = tokenRequired
+  ? (process.env.GROK_REMOTE_TOKEN_FILE ||
+     fileEnv.GROK_REMOTE_TOKEN_FILE ||
+     (fs.existsSync(defaultTokenFile) ? defaultTokenFile : ''))
+  : (process.env.GROK_REMOTE_TOKEN_FILE || fileEnv.GROK_REMOTE_TOKEN_FILE || '');
 
 module.exports = {
   apps: [
@@ -62,8 +70,11 @@ module.exports = {
         PORT: Number(process.env.PORT || fileEnv.PORT || 7910),
         HOST,
         GROK_REMOTE_HOST: HOST,
+        // Default: Tailscale is the login when bound to 100.x (see lib/auth.ts).
+        GROK_REMOTE_AUTH: process.env.GROK_REMOTE_AUTH || fileEnv.GROK_REMOTE_AUTH || 'auto',
         GROK_REMOTE_TOKEN: process.env.GROK_REMOTE_TOKEN || fileEnv.GROK_REMOTE_TOKEN || '',
         GROK_REMOTE_TOKEN_FILE,
+        GROK_REMOTE_TOKEN_REQUIRED: process.env.GROK_REMOTE_TOKEN_REQUIRED || fileEnv.GROK_REMOTE_TOKEN_REQUIRED || '',
         GROK_REMOTE_ALLOW_OPEN: process.env.GROK_REMOTE_ALLOW_OPEN || fileEnv.GROK_REMOTE_ALLOW_OPEN || '',
       },
       out_file: './logs/grok-remote.out.log',

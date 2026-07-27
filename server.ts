@@ -34,7 +34,7 @@ import {
   readReleases,
   type UpdateStepEvent,
 } from './lib/version-update.js';
-import { loadAuthConfig, checkAuth, logAuthStartup, type AuthConfig } from './lib/auth.js';
+import { loadAuthConfig, checkAuth, logAuthStartup, publicAuthInfo, type AuthConfig } from './lib/auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -212,12 +212,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: string,
       platform: process.platform,
       hostname: os.hostname(),
       tailscale: ts,
+      auth: publicAuthInfo(AUTH_CFG),
     });
     return;
   }
 
   if (url === '/api/health' && method === 'GET') {
-    sendJson(res, 200, { ok: true, version: APP_VERSION, uptime_seconds: Math.floor(process.uptime()) });
+    sendJson(res, 200, {
+      ok: true,
+      version: APP_VERSION,
+      uptime_seconds: Math.floor(process.uptime()),
+      auth: publicAuthInfo(AUTH_CFG),
+    });
+    return;
+  }
+
+  if (url === '/api/auth/status' && method === 'GET') {
+    sendJson(res, 200, { ok: true, ...publicAuthInfo(AUTH_CFG) });
     return;
   }
 

@@ -133,10 +133,21 @@ export function hide(): void {
   if (overlay) overlay.hidden = true;
 }
 
-/** Probe the API once; show the gate if unauthorized. */
+/** Probe auth status; only show the gate when the server actually requires a token. */
 export async function ensureAuthOrGate(): Promise<boolean> {
   // Seed token from ?token= if present (getAuthToken already does this).
   getAuthToken();
+  try {
+    const st = await fetch('/api/auth/status', { headers: { accept: 'application/json' } });
+    if (st.ok) {
+      const info = await st.json() as { tokenRequired?: boolean; mode?: string; hint?: string };
+      if (!info.tokenRequired) {
+        // Tailnet / open / loopback — no paste UI.
+        return true;
+      }
+    }
+  } catch { /* fall through to agents probe */ }
+
   try {
     await api.listAgents();
     return true;
