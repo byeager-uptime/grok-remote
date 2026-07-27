@@ -525,8 +525,18 @@ export class AgentsSidebar {
     this._updateMultiFooter();
 
     if (errorMessage) {
+      const isAuth = /unauthorized|401/i.test(errorMessage);
       this.activeList.appendChild(el('div', { class: 'agents-empty agents-empty--err' },
-        'backend unreachable'));
+        isAuth
+          ? 'unauthorized — open the token dialog (or reload with ?token=…)'
+          : `backend error: ${errorMessage.slice(0, 120)}`));
+      if (isAuth) {
+        try {
+          window.dispatchEvent(new CustomEvent('grok-remote:auth-required', {
+            detail: { error: errorMessage },
+          }));
+        } catch { /* ignore */ }
+      }
       return;
     }
 

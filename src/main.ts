@@ -11,6 +11,7 @@ import { applyTheme, getTheme, nextTheme, getThemeMeta } from './lib/themes.js';
 import { installVersionFooter } from './lib/version-footer.js';
 import { SYSTEM_PAGES, getSystemPage } from './views/system/index.js';
 import { iconHtml } from './lib/icons.js';
+import { installAuthGate } from './lib/auth-gate.js';
 
 interface Agent {
   id: string;
@@ -176,6 +177,9 @@ function updateRailHighlight(route: Route): void {
 }
 
 function mountDashboard(): void {
+  // Token gate before (and during) dashboard life — iPad PWAs often drop ?token=.
+  installAuthGate();
+
   const host = document.getElementById('app');
   if (!host) return;
   host.replaceChildren();

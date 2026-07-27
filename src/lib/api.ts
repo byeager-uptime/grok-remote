@@ -68,9 +68,20 @@ async function request(method: string, path: string, body?: unknown): Promise<un
       ? String((data as { error?: unknown; message?: unknown }).error
               ?? (data as { message?: unknown }).message)
       : `HTTP ${r.status}`;
-    const err = new Error(msg) as ApiError;
+    const err = new Error(
+      r.status === 401
+        ? (msg.includes('unauthorized') ? msg : `unauthorized (${msg})`)
+        : msg,
+    ) as ApiError;
     err.status = r.status;
     err.body = data;
+    if (r.status === 401) {
+      try {
+        window.dispatchEvent(new CustomEvent('grok-remote:auth-required', {
+          detail: { error: msg },
+        }));
+      } catch { /* ignore */ }
+    }
     throw err;
   }
   return data;

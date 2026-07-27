@@ -157,7 +157,8 @@ function render(): void {
     <section class="system-page sessions-page">
       <h2 class="system-page-title">Sessions</h2>
       <p class="system-page-sub">
-        wraps <code>grok sessions list</code> and <code>grok sessions search</code>.
+        all Grok sessions on this host (cross-cwd index + CLI).
+        sidebar “chats” are grok-remote agents; this page is full session history.
         click a row to copy its session id.
       </p>
 
