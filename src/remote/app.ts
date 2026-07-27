@@ -3,7 +3,7 @@
 // Only ship controls that do something. Live SSE for active threads.
 
 import {
-  iconMenu, iconBack, iconCompose, iconMic, iconSearch, iconSend,
+  iconBack, iconCompose, iconMic, iconSearch, iconSend, iconMore,
   iconPlus, iconFolder, iconExternal, iconComputer, svgBtn,
 } from './icons.js';
 
@@ -246,6 +246,7 @@ export class RemoteApp {
   private _turnGotAsst = false;
   private _listPoll: ReturnType<typeof setInterval> | null = null;
   private _sending = false;
+  private _vvBound = false;
 
   constructor() {
     this.root = el('div', { class: 'rr-app' });
@@ -254,7 +255,122 @@ export class RemoteApp {
   mount(parent: HTMLElement): void {
     parent.appendChild(this.root);
     window.addEventListener('hashchange', () => void this.render());
+    this.bindVisualViewport();
     void this.bootstrap();
+  }
+
+  /**
+   * iOS PWA keyboard + status-bar layout.
+   * Pin the shell to visualViewport so the header never slides under the
+   * Dynamic Island and the composer sits flush above the keyboard.
+   */
+  private bindVisualViewport(): void {
+    if (this._vvBound) return;
+    this._vvBound = true;
+    const apply = (): void => {
+      const vv = window.visualViewport;
+      const h = vv ? vv.height : window.innerHeight;
+      const top = vv ? vv.offsetTop : 0;
+      document.documentElement.style.setProperty('--rr-vvh', `${Math.round(h)}px`);
+      document.documentElement.style.setProperty('--rr-vvo', `${Math.round(top)}px`);
+      // Keyboard open if the visual viewport is meaningfully shorter than layout.
+      const kb = (window.innerHeight - h) > 120 || (vv != null && vv.height < window.innerHeight * 0.75);
+      document.body.classList.toggle('rr-kb', kb);
+    };
+    apply();
+    window.visualViewport?.addEventListener('resize', apply);
+    window.visualViewport?.addEventListener('scroll', apply);
+    window.addEventListener('resize', apply);
+    // focusin/out covers cases where visualViewport lags
+    window.addEventListener('focusin', (ev) => {
+      const t = ev.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) {
+        document.body.classList.add('rr-kb');
+        // After keyboard animates, re-measure
+        setTimeout(apply, 50);
+        setTimeout(apply, 300);
+      }
+    });
+    window.addEventListener('focusout', () => {
+      setTimeout(() => {
+        apply();
+        // Clear kb class if nothing focused
+        const a = document.activeElement as HTMLElement | null;
+        if (!a || (a.tagName !== 'INPUT' && a.tagName !== 'TEXTAREA')) {
+          // re-apply will set based on size; don't force off early
+        }
+      }, 100);
+    });
+  }
+
+  private openOverflowMenu(items: Array<{ label: string; action: () => void; danger?: boolean }>): void {
+    const close = (): void => { backdrop.remove(); };
+    const sheet = el('div', { class: 'rr-menu-sheet' });
+    for (const it of items) {
+      const b = el('button', {
+        class: it.danger ? 'rr-menu-item rr-menu-item--danger' : 'rr-menu-item',
+        type: 'button',
+      }, it.label) as HTMLButtonElement;
+      b.onclick = () => { close(); it.action(); };
+      sheet.appendChild(b);
+    }
+    const cancel = el('button', { class: 'rr-menu-cancel', type: 'button' }, 'Cancel') as HTMLButtonElement;
+    cancel.onclick = close;
+    sheet.appendChild(cancel);
+    const backdrop = el('div', { class: 'rr-menu-backdrop' }, sheet);
+    backdrop.onclick = (ev) => { if (ev.target === backdrop) close(); };
+    this.root.appendChild(backdrop);
+  }
+
+  /** Pull-to-refresh on a scroll container. */
+  private attachPullToRefresh(scroll: HTMLElement, onRefresh: () => Promise<void>): void {
+    const ptr = el('div', { class: 'rr-ptr' }, 'Pull to refresh');
+    scroll.prepend(ptr);
+    let startY = 0;
+    let pulling = false;
+    let armed = false;
+
+    scroll.addEventListener('touchstart', (ev) => {
+      if (scroll.scrollTop > 0) { pulling = false; return; }
+      startY = ev.touches[0]?.clientY || 0;
+      pulling = true;
+      armed = false;
+    }, { passive: true });
+
+    scroll.addEventListener('touchmove', (ev) => {
+      if (!pulling) return;
+      const y = ev.touches[0]?.clientY || 0;
+      const dy = y - startY;
+      if (dy > 12 && scroll.scrollTop <= 0) {
+        ptr.classList.add('rr-ptr--active');
+        if (dy > 64) {
+          ptr.textContent = 'Release to refresh';
+          ptr.classList.add('rr-ptr--ready');
+          armed = true;
+        } else {
+          ptr.textContent = 'Pull to refresh';
+          ptr.classList.remove('rr-ptr--ready');
+          armed = false;
+        }
+      }
+    }, { passive: true });
+
+    scroll.addEventListener('touchend', () => {
+      if (!pulling) return;
+      pulling = false;
+      const doIt = armed;
+      ptr.classList.remove('rr-ptr--active', 'rr-ptr--ready');
+      ptr.textContent = 'Pull to refresh';
+      if (doIt) {
+        ptr.classList.add('rr-ptr--active');
+        ptr.textContent = 'Refreshing…';
+        void onRefresh().finally(() => {
+          ptr.classList.remove('rr-ptr--active');
+          ptr.textContent = 'Pull to refresh';
+        });
+      }
+      armed = false;
+    }, { passive: true });
   }
 
   private startListPoll(): void {
@@ -355,11 +471,14 @@ export class RemoteApp {
     // Safe to re-call from search/filter without full route render
     this.root.replaceChildren();
     const header = el('div', { class: 'rr-header rr-header--simple' });
-    const refresh = svgBtn(iconMenu(), 'rr-circ', 'Refresh sessions');
-    refresh.onclick = () => {
-      void this.loadSessions().then(() => this.render());
+    // Left: search (real action). Right: ⋯ menu (refresh lives there + pull-to-refresh).
+    const searchBtn = svgBtn(iconSearch(), 'rr-circ', 'Search sessions');
+    searchBtn.onclick = () => {
+      this.searchOpen = !this.searchOpen;
+      if (!this.searchOpen) this.searchQuery = '';
+      this.renderHome();
     };
-    header.appendChild(refresh);
+    header.appendChild(searchBtn);
     header.appendChild(
       el('div', { class: 'rr-header-center' },
         el('div', { class: 'rr-header-title' }, 'Remote'),
@@ -375,15 +494,38 @@ export class RemoteApp {
         ),
       ),
     );
-    const searchBtn = svgBtn(iconSearch(), 'rr-circ', 'Search sessions');
-    searchBtn.onclick = () => {
-      this.searchOpen = !this.searchOpen;
-      if (!this.searchOpen) this.searchQuery = '';
-      this.renderHome();
-    };
-    header.appendChild(searchBtn);
+    const moreHome = svgBtn(iconMore(), 'rr-circ', 'More options');
+    moreHome.onclick = () => this.openOverflowMenu([
+      {
+        label: 'Refresh sessions',
+        action: () => { void this.loadSessions().then(() => this.render()); },
+      },
+      {
+        label: this.searchOpen ? 'Hide search' : 'Search sessions',
+        action: () => {
+          this.searchOpen = !this.searchOpen;
+          if (!this.searchOpen) this.searchQuery = '';
+          this.renderHome();
+        },
+      },
+      { label: 'New task', action: () => navigate('#/remote/new') },
+      {
+        label: 'Reload app',
+        action: () => { location.reload(); },
+      },
+      {
+        label: 'Advanced console',
+        action: () => { location.hash = '#/advanced'; location.reload(); },
+      },
+    ]);
+    header.appendChild(moreHome);
 
     const scroll = el('div', { class: 'rr-scroll' });
+    this.attachPullToRefresh(scroll, async () => {
+      await this.loadSessions();
+      this.renderHome();
+      this.toast('Sessions refreshed');
+    });
     scroll.appendChild(el('h1', { class: 'rr-h1' }, 'Projects'));
 
     if (this.searchOpen) {
@@ -554,7 +696,10 @@ export class RemoteApp {
     infoBanner?: string | null;
     skipQuote?: boolean;
   }): void {
+    // Keep pull-to-refresh node if present
+    const ptr = scroll.querySelector('.rr-ptr');
     scroll.replaceChildren();
+    if (ptr) scroll.appendChild(ptr);
     if (opts?.stuckLabel) {
       scroll.appendChild(el('div', { class: 'rr-soft-stuck' }, opts.stuckLabel));
     }
@@ -699,16 +844,52 @@ export class RemoteApp {
     const back = svgBtn(iconBack(), 'rr-circ', 'Back');
     back.onclick = () => navigate('#/remote');
     header.appendChild(back);
+    // Single-line title by default; host only when keyboard closed (CSS hides on rr-kb)
     const titles = el('div', { class: 'rr-thread-titles' },
       el('div', { class: 'rr-t1', id: 'rr-t1' }, title),
-      el('div', { class: 'rr-t2' }, this.hostLabel),
+      el('div', { class: 'rr-t2', id: 'rr-t2' }, this.hostLabel),
     );
     header.appendChild(titles);
-    const neu = svgBtn(iconCompose(), 'rr-circ', 'New task');
-    neu.onclick = () => navigate('#/remote/new');
-    header.appendChild(neu);
+    const moreBtn = svgBtn(iconMore(), 'rr-circ', 'More options');
+    moreBtn.onclick = () => {
+      this.openOverflowMenu([
+        {
+          label: 'Refresh conversation',
+          action: () => { void this.render(); this.toast('Conversation refreshed'); },
+        },
+        {
+          label: 'New task',
+          action: () => navigate('#/remote/new'),
+        },
+        {
+          label: 'Copy session id',
+          action: () => {
+            void navigator.clipboard?.writeText(sessionId).then(
+              () => this.toast('Session id copied'),
+              () => this.toast(sessionId),
+            );
+          },
+        },
+        {
+          label: 'Reload app',
+          action: () => { location.reload(); },
+        },
+        {
+          label: 'Advanced console',
+          action: () => { location.hash = '#/advanced'; location.reload(); },
+        },
+      ]);
+    };
+    header.appendChild(moreBtn);
 
     const scroll = el('div', { class: 'rr-scroll', id: 'rr-thread-body' });
+    this.attachPullToRefresh(scroll, async () => {
+      // Soft re-render of this thread
+      const route = parseRoute();
+      if (route.name === 'thread') {
+        await this.renderThread(route.sessionId);
+      }
+    });
     scroll.appendChild(el('div', { class: 'rr-muted' }, 'Opening…'));
 
     const input = document.createElement('input');
@@ -716,6 +897,10 @@ export class RemoteApp {
     input.placeholder = 'Message Grok';
     input.enterKeyHint = 'send';
     input.autocomplete = 'off';
+    input.autocapitalize = 'sentences';
+    // Keep iOS from zooming / reduce accessory chrome where possible
+    input.setAttribute('enterkeyhint', 'send');
+    input.setAttribute('inputmode', 'text');
 
     const plus = svgBtn(iconPlus(), 'rr-circ', 'Attach');
     plus.disabled = true;
