@@ -1,30 +1,30 @@
-node_modules/
-dist/
-logs/
-.DS_Store
-.env
-.env.local
-.env.*.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-*.tsbuildinfo
-.cache/
-.tmp/
-.claude/
 
+# local secrets / runtime
 # personal drafts (tweets, scratch notes)
-tweet.md
-scratch.md
-
 # protocol probe captures: contain hostname + home paths. probe.js stays.
+*.token
+*.tsbuildinfo
+.DS_Store
+.cache/
+.claude/
+.env
+.env.*.local
+.env.local
+.env.pm2
+.grok-remote-token
+.tmp/
+LOOP_LOG.md
+dist/
+dogfood-output/screenshots/
 experiments/*.log
 experiments/exp*-out.txt
 experiments/exp*-prompt.txt
-LOOP_LOG.md
-token
-# local secrets / runtime
-.env.pm2
+logs/
+node_modules/
+npm-debug.log*
 pm2.env
-.grok-remote-token
-*.token
+scratch.md
+token
+tweet.md
+yarn-debug.log*
+yarn-error.log*

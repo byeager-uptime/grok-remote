@@ -1,8 +1,9 @@
 // Phone-first Remote shell — ChatGPT Remote visual language.
 // Outline folder icons only. No emoji in project names or chrome.
+// Only ship controls that do something. Live SSE for active threads.
 
 import {
-  iconMenu, iconSearch, iconMore, iconBack, iconCompose, iconMic,
+  iconMenu, iconBack, iconCompose, iconMic,
   iconPlus, iconFolder, iconExternal, iconComputer, svgBtn,
 } from './icons.js';
 
@@ -42,6 +43,16 @@ type Route =
   | { name: 'thread'; sessionId: string }
   | { name: 'new' };
 
+interface HistEvent {
+  event?: string;
+  data?: {
+    text?: string;
+    update?: { content?: { text?: string }; sessionUpdate?: string };
+    status?: string;
+    message?: string;
+  };
+}
+
 function parseRoute(): Route {
   const h = (location.hash || '#/remote').replace(/^#/, '');
   const parts = h.split('/').filter(Boolean);
@@ -75,7 +86,6 @@ async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return j as T;
 }
 
-/** Strip emoji / symbols from project labels — always plain text. */
 function cleanLabel(s: string): string {
   return String(s || '')
     .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}]/gu, '')
@@ -106,15 +116,93 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-function linkify(text: string): string {
-  const esc = text
+/** Escape + light markdown → HTML (headings, bold, code, lists, links, paragraphs). */
+function formatMessage(text: string): string {
+  let s = String(text || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-  return esc.replace(
+
+  // fenced code
+  s = s.replace(/```[\w]*\n?([\s\S]*?)```/g, (_m, code: string) =>
+    `<pre class="rr-code">${code.replace(/^\n|\n$/g, '')}</pre>`);
+  // inline code
+  s = s.replace(/`([^`\n]+)`/g, '<code class="rr-icode">$1</code>');
+  // bold / italic
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+  // headings
+  s = s.replace(/^######\s+(.+)$/gm, '<div class="rr-h6">$1</div>');
+  s = s.replace(/^#####\s+(.+)$/gm, '<div class="rr-h6">$1</div>');
+  s = s.replace(/^####\s+(.+)$/gm, '<div class="rr-h5">$1</div>');
+  s = s.replace(/^###\s+(.+)$/gm, '<div class="rr-h5">$1</div>');
+  s = s.replace(/^##\s+(.+)$/gm, '<div class="rr-h4">$1</div>');
+  s = s.replace(/^#\s+(.+)$/gm, '<div class="rr-h4">$1</div>');
+  // unordered list items
+  s = s.replace(/^[-*]\s+(.+)$/gm, '<div class="rr-li">• $1</div>');
+  // links
+  s = s.replace(
     /(https?:\/\/[^\s<&]+)/g,
     '<a class="rr-link" href="$1" target="_blank" rel="noopener noreferrer">$1</a>',
   );
+  // paragraphs: double newlines
+  s = s.split(/\n{2,}/).map((p) => {
+    if (/^<(pre|div|ul)/.test(p.trim())) return p;
+    return `<p>${p.replace(/\n/g, '<br>')}</p>`;
+  }).join('');
+  return s;
+}
+
+function userBubble(text: string): HTMLElement {
+  return el('div', { class: 'rr-msg-user' }, text.slice(0, 4000));
+}
+
+function asstBubble(text: string): HTMLElement {
+  const box = el('div', { class: 'rr-msg-asst' });
+  box.appendChild(el('div', { class: 'rr-who' }, 'GROK'));
+  const body = el('div', { class: 'rr-body' }) as HTMLElement;
+  body.innerHTML = formatMessage(text.slice(0, 16000));
+  box.appendChild(body);
+  return box;
+}
+
+/** Parse NDJSON history into ordered turn list (merge consecutive assistant chunks). */
+function parseHistoryTurns(raw: string): Array<{ role: 'user' | 'asst'; text: string }> {
+  const turns: Array<{ role: 'user' | 'asst'; text: string }> = [];
+  let asst = '';
+  const flush = (): void => {
+    const t = asst.trim();
+    if (t) turns.push({ role: 'asst', text: t });
+    asst = '';
+  };
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let ev: HistEvent;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.event === 'user_message' && ev.data?.text) {
+      flush();
+      turns.push({ role: 'user', text: String(ev.data.text).trim() });
+    } else if (ev.event === 'agent_message_chunk') {
+      const t = ev.data?.update?.content?.text;
+      if (t) asst += String(t);
+    } else if (ev.event === 'prompt_complete' || ev.event === 'prompt_result') {
+      flush();
+    }
+  }
+  flush();
+  // Dedupe consecutive identical turns (bad double-seed)
+  const out: typeof turns = [];
+  for (const t of turns) {
+    const prev = out[out.length - 1];
+    if (prev && prev.role === t.role && prev.text === t.text) continue;
+    // Also skip asst that is exact prefix-duplicate of previous (concat bug)
+    if (prev && prev.role === 'asst' && t.role === 'asst' && t.text.startsWith(prev.text.slice(0, 80)) && prev.text.length > 200) {
+      out[out.length - 1] = t.length > prev.text.length ? t : prev;
+      continue;
+    }
+    out.push(t);
+  }
+  return out;
 }
 
 export class RemoteApp {
@@ -125,6 +213,13 @@ export class RemoteApp {
   loading = false;
   error: string | null = null;
   collapsed = new Set<string>();
+  private _es: EventSource | null = null;
+  private _threadAgentId: string | null = null;
+  private _liveAsstEl: HTMLElement | null = null;
+  private _liveAsstText = '';
+  private _statusEl: HTMLElement | null = null;
+  /** True once this user turn already received assistant text (SSE or poll). */
+  private _turnGotAsst = false;
 
   constructor() {
     this.root = el('div', { class: 'rr-app' });
@@ -134,6 +229,18 @@ export class RemoteApp {
     parent.appendChild(this.root);
     window.addEventListener('hashchange', () => void this.render());
     void this.bootstrap();
+  }
+
+  private closeStream(): void {
+    if (this._es) {
+      try { this._es.close(); } catch { /* ignore */ }
+      this._es = null;
+    }
+    this._liveAsstEl = null;
+    this._liveAsstText = '';
+    this._statusEl = null;
+    this._threadAgentId = null;
+    this._turnGotAsst = false;
   }
 
   async bootstrap(): Promise<void> {
@@ -165,6 +272,7 @@ export class RemoteApp {
   }
 
   async render(): Promise<void> {
+    this.closeStream();
     const route = parseRoute();
     this.root.replaceChildren();
     if (route.name === 'thread') {
@@ -178,9 +286,20 @@ export class RemoteApp {
     this.renderHome();
   }
 
+  private toast(msg: string): void {
+    const t = el('div', { class: 'rr-toast' }, msg);
+    this.root.appendChild(t);
+    setTimeout(() => t.remove(), 2800);
+  }
+
   renderHome(): void {
-    const header = el('div', { class: 'rr-header' });
-    header.appendChild(svgBtn(iconMenu(), 'rr-circ', 'Menu'));
+    const header = el('div', { class: 'rr-header rr-header--simple' });
+    // Only controls that do work: refresh list (was dead Menu).
+    const refresh = svgBtn(iconMenu(), 'rr-circ', 'Refresh sessions');
+    refresh.onclick = () => {
+      void this.loadSessions().then(() => this.render());
+    };
+    header.appendChild(refresh);
     header.appendChild(
       el('div', { class: 'rr-header-center' },
         el('div', { class: 'rr-header-title' }, 'Remote'),
@@ -196,8 +315,8 @@ export class RemoteApp {
         ),
       ),
     );
-    header.appendChild(svgBtn(iconMore(), 'rr-circ', 'More'));
-    header.appendChild(svgBtn(iconSearch(), 'rr-circ', 'Search'));
+    // spacer to balance grid
+    header.appendChild(el('div', { class: 'rr-circ-spacer' }));
 
     const scroll = el('div', { class: 'rr-scroll' });
     scroll.appendChild(el('h1', { class: 'rr-h1' }, 'Projects'));
@@ -222,43 +341,43 @@ export class RemoteApp {
     } else {
       for (const g of this.projects) {
         const collapsed = this.collapsed.has(g.projectId);
+        const row = el('div', { class: 'rr-proj-row' });
         const head = el('button', { class: 'rr-proj-head', type: 'button' }) as HTMLButtonElement;
         head.innerHTML = iconFolder();
         head.appendChild(el('span', { class: 'rr-proj-name' }, cleanLabel(g.projectLabel)));
         head.appendChild(el('span', { class: 'rr-proj-chev' }, collapsed ? '▸' : '▾'));
-        const ext = document.createElement('button');
-        ext.type = 'button';
-        ext.className = 'rr-proj-ext';
-        ext.title = 'Open project path info';
-        ext.innerHTML = iconExternal();
-        ext.onclick = (ev) => {
-          ev.stopPropagation();
-          // On-device: show path (phone can't open host FS)
-          alert(g.cwd || g.projectLabel);
-        };
-        head.appendChild(ext);
         head.onclick = () => {
           if (this.collapsed.has(g.projectId)) this.collapsed.delete(g.projectId);
           else this.collapsed.add(g.projectId);
           void this.render();
         };
-        scroll.appendChild(head);
+        const ext = document.createElement('button');
+        ext.type = 'button';
+        ext.className = 'rr-proj-ext';
+        ext.setAttribute('aria-label', 'Show project path');
+        ext.innerHTML = iconExternal();
+        ext.onclick = (ev) => {
+          ev.stopPropagation();
+          this.toast(g.cwd || cleanLabel(g.projectLabel));
+        };
+        row.appendChild(head);
+        row.appendChild(ext);
+        scroll.appendChild(row);
 
         if (collapsed) continue;
         for (const s of g.sessions) {
-          const row = el('button', { class: 'rr-thread', type: 'button' }) as HTMLButtonElement;
-          row.onclick = () => navigate(`#/remote/s/${encodeURIComponent(s.sessionId)}`);
-          row.appendChild(el('span', { class: `rr-st rr-st--${s.status}` }));
-          row.appendChild(el('span', { class: 'rr-thread-t' }, s.title));
-          scroll.appendChild(row);
+          const thr = el('button', { class: 'rr-thread', type: 'button' }) as HTMLButtonElement;
+          thr.onclick = () => navigate(`#/remote/s/${encodeURIComponent(s.sessionId)}`);
+          thr.appendChild(el('span', { class: `rr-st rr-st--${s.status}` }));
+          thr.appendChild(el('span', { class: 'rr-thread-t' }, s.title));
+          scroll.appendChild(thr);
         }
       }
     }
 
     const bottom = el('div', { class: 'rr-bottom' });
     const chats = el('button', { class: 'rr-chats-pill', type: 'button' }) as HTMLButtonElement;
-    chats.appendChild(document.createTextNode('Chats '));
-    chats.appendChild(el('span', { class: 'rr-down' }, '▾'));
+    chats.textContent = 'Refresh';
     chats.onclick = () => void this.loadSessions().then(() => this.render());
     const actions = el('div', { class: 'rr-bottom-actions' });
     const mic = svgBtn(iconMic(), 'rr-circ', 'Voice (coming soon)');
@@ -272,7 +391,6 @@ export class RemoteApp {
 
     const foot = el('div', { class: 'rr-foot' });
     const adv = el('a', { href: '#/advanced' }, 'Advanced console') as HTMLAnchorElement;
-    // Full reload so main.ts can mount the legacy console (hashchange alone won't).
     adv.addEventListener('click', (ev) => {
       ev.preventDefault();
       location.hash = '#/advanced';
@@ -286,42 +404,171 @@ export class RemoteApp {
     this.root.appendChild(foot);
   }
 
+  private paintTurns(scroll: HTMLElement, turns: Array<{ role: 'user' | 'asst'; text: string }>, opts?: {
+    stuckLabel?: string | null;
+    infoBanner?: string | null;
+    skipQuote?: boolean;
+  }): void {
+    scroll.replaceChildren();
+    if (opts?.stuckLabel) {
+      scroll.appendChild(el('div', { class: 'rr-soft-stuck' }, opts.stuckLabel));
+    }
+    if (opts?.infoBanner) {
+      scroll.appendChild(el('div', { class: 'rr-info-banner' }, opts.infoBanner));
+    }
+    // Quote only when we have a prior user turn and later content (ChatGPT-ish)
+    if (!opts?.skipQuote) {
+      const firstUser = turns.find((t) => t.role === 'user');
+      if (firstUser && turns.length > 1) {
+        const q = firstUser.text;
+        scroll.appendChild(el('div', { class: 'rr-quote' },
+          `"${q.slice(0, 280)}${q.length > 280 ? '…' : ''}"`,
+        ));
+      }
+    }
+    if (!turns.length) {
+      scroll.appendChild(el('div', { class: 'rr-muted' },
+        'No messages yet. Type a nudge below.',
+      ));
+      return;
+    }
+    for (const t of turns) {
+      scroll.appendChild(t.role === 'user' ? userBubble(t.text) : asstBubble(t.text));
+    }
+  }
+
+  private appendLiveAsst(scroll: HTMLElement, chunk: string): void {
+    this._liveAsstText += chunk;
+    this._turnGotAsst = true;
+    if (!this._liveAsstEl) {
+      this._liveAsstEl = asstBubble(this._liveAsstText);
+      scroll.appendChild(this._liveAsstEl);
+    } else {
+      const body = this._liveAsstEl.querySelector('.rr-body') as HTMLElement | null;
+      if (body) body.innerHTML = formatMessage(this._liveAsstText.slice(0, 16000));
+    }
+    scroll.scrollTop = scroll.scrollHeight;
+  }
+
+  private setStatus(scroll: HTMLElement, text: string | null): void {
+    if (this._statusEl) {
+      this._statusEl.remove();
+      this._statusEl = null;
+    }
+    if (!text) return;
+    this._statusEl = el('div', { class: 'rr-muted rr-live-status' }, text);
+    scroll.appendChild(this._statusEl);
+    scroll.scrollTop = scroll.scrollHeight;
+  }
+
+  private connectStream(agentId: string, scroll: HTMLElement): void {
+    this.closeStream();
+    this._threadAgentId = agentId;
+    const es = new EventSource(`/api/agents/${encodeURIComponent(agentId)}/stream`);
+    this._es = es;
+
+    // Server writes named SSE events: event: agent_message_chunk\ndata: {...payload}
+    // Payload is the ring entry's `data` field (not the wrapper).
+    const onNamed = (name: string, raw: string): void => {
+      let data: HistEvent['data'] & {
+        text?: string;
+        status?: string;
+        message?: string;
+        update?: { content?: { text?: string } };
+      };
+      try { data = JSON.parse(raw); } catch { return; }
+
+      if (name === 'agent_message_chunk') {
+        const t = data?.update?.content?.text || data?.text;
+        if (t) {
+          this.setStatus(scroll, null);
+          this.appendLiveAsst(scroll, String(t));
+        }
+        return;
+      }
+      if (name === 'agent_status') {
+        const st = data?.status || '';
+        if (st === 'running' || st === 'starting') {
+          this.setStatus(scroll, 'Working on host…');
+        } else if (st === 'idle' || st === 'disconnected') {
+          this.setStatus(scroll, null);
+        } else if (st === 'errored') {
+          this.setStatus(scroll, null);
+          scroll.appendChild(el('div', { class: 'rr-error' }, data?.message || 'Agent error'));
+        }
+        return;
+      }
+      if (name === 'error') {
+        scroll.appendChild(el('div', { class: 'rr-error' }, data?.message || 'Error'));
+        return;
+      }
+      if (name === 'prompt_complete' || name === 'prompt_result') {
+        this.setStatus(scroll, null);
+        // Keep painted bubble; next user send resets buffer.
+      }
+    };
+
+    for (const name of [
+      'agent_message_chunk',
+      'agent_status',
+      'error',
+      'prompt_complete',
+      'prompt_result',
+      'user_message',
+    ]) {
+      es.addEventListener(name, (ev) => {
+        const me = ev as MessageEvent;
+        if (me.data) onNamed(name, String(me.data));
+      });
+    }
+    // Fallback for unnamed events (full ring wrapper)
+    es.onmessage = (msg) => {
+      if (!msg.data) return;
+      try {
+        const wrapped = JSON.parse(msg.data) as { event?: string; data?: unknown };
+        if (wrapped.event && wrapped.data != null) {
+          onNamed(wrapped.event, JSON.stringify(wrapped.data));
+        }
+      } catch { /* ignore */ }
+    };
+    es.onerror = () => {
+      // browser will retry; don't spam UI
+    };
+  }
+
   async renderThread(sessionId: string): Promise<void> {
     let title = sessionId.slice(0, 8);
     let listStatus: RemoteSession['status'] | null = null;
-    let isLocal = true;
+    let isLocalList = true;
     for (const g of this.projects) {
       const hit = g.sessions.find((s) => s.sessionId === sessionId);
       if (hit) {
         title = hit.title;
         listStatus = hit.status;
-        isLocal = hit.local !== false;
+        isLocalList = hit.local !== false;
         break;
       }
     }
 
-    const header = el('div', { class: 'rr-thread-header' });
-    const menu = svgBtn(iconMenu(), 'rr-circ', 'Menu');
-    menu.onclick = () => navigate('#/remote');
+    const header = el('div', { class: 'rr-thread-header rr-thread-header--simple' });
     const back = svgBtn(iconBack(), 'rr-circ', 'Back');
     back.onclick = () => navigate('#/remote');
-    header.appendChild(menu);
     header.appendChild(back);
-    header.appendChild(
-      el('div', { class: 'rr-thread-titles' },
-        el('div', { class: 'rr-t1', id: 'rr-t1' }, title),
-        el('div', { class: 'rr-t2' }, this.hostLabel),
-      ),
+    const titles = el('div', { class: 'rr-thread-titles' },
+      el('div', { class: 'rr-t1', id: 'rr-t1' }, title),
+      el('div', { class: 'rr-t2' }, this.hostLabel),
     );
-    header.appendChild(svgBtn(iconCompose(), 'rr-circ', 'Compose'));
-    header.appendChild(svgBtn(iconMore(), 'rr-circ', 'More'));
+    header.appendChild(titles);
+    const neu = svgBtn(iconCompose(), 'rr-circ', 'New task');
+    neu.onclick = () => navigate('#/remote/new');
+    header.appendChild(neu);
 
     const scroll = el('div', { class: 'rr-scroll', id: 'rr-thread-body' });
     scroll.appendChild(el('div', { class: 'rr-muted' }, 'Opening…'));
 
     const input = document.createElement('input');
     input.type = 'text';
-    input.placeholder = `Work on ${this.hostLabel}`;
+    input.placeholder = 'Message Grok';
     input.enterKeyHint = 'send';
     input.autocomplete = 'off';
 
@@ -341,90 +588,64 @@ export class RemoteApp {
     let agentId = sessionId;
     try {
       const open = await apiPost<{
-        agent: { id: string; status?: string; lastError?: string | null; connected?: boolean };
+        agent: {
+          id: string;
+          name?: string;
+          status?: string;
+          lastError?: string | null;
+          connected?: boolean;
+        };
         hasLocalContent?: boolean;
       }>(
         `/api/remote/sessions/${encodeURIComponent(sessionId)}/open`,
         { connect: true, name: title },
       );
       agentId = open.agent?.id || sessionId;
-      const hasLocal = open.hasLocalContent !== false && isLocal;
 
-      scroll.replaceChildren();
-
-      // Status banner — only "Needs you" when list says stuck or real error.
-      if (open.agent?.lastError) {
-        scroll.appendChild(el('div', { class: 'rr-soft-stuck' },
-          `Needs you · ${open.agent.lastError.slice(0, 120)}`,
-        ));
-      } else if (listStatus === 'stuck') {
-        scroll.appendChild(el('div', { class: 'rr-soft-stuck' },
-          'Needs you · resume or send a nudge below',
-        ));
-      } else if (!hasLocal) {
-        scroll.appendChild(el('div', { class: 'rr-info-banner' },
-          'Cloud archive on this account — no transcript files on this host. Start a related task below.',
-        ));
+      // Prefer live agent name over UUID / list miss
+      if (open.agent?.name && (title === sessionId.slice(0, 8) || !title)) {
+        title = open.agent.name;
       }
+      if (open.agent?.name && /^[0-9a-f]{8}$/i.test(title)) {
+        title = open.agent.name;
+      }
+      const t1 = this.root.querySelector('#rr-t1');
+      if (t1) t1.textContent = title;
 
-      const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=60`, {
+      // Cloud only if list says non-local AND open says no disk AND agent is not live connected
+      const isCloudArchive =
+        isLocalList === false &&
+        open.hasLocalContent === false &&
+        !open.agent?.connected &&
+        open.agent?.status === 'disconnected';
+
+      const stuckLabel =
+        open.agent?.lastError
+          ? `Needs you · ${open.agent.lastError.slice(0, 120)}`
+          : listStatus === 'stuck'
+            ? 'Needs you · resume or send a nudge below'
+            : null;
+
+      const infoBanner = isCloudArchive
+        ? 'Cloud archive on this account — no transcript files on this host. Start a related task below.'
+        : null;
+
+      const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
         headers: { accept: 'application/x-ndjson' },
       });
-
-      let firstUser: string | null = null;
-      const chunks: HTMLElement[] = [];
-      let asstBuf = '';
-      const flushAsst = (): void => {
-        if (!asstBuf.trim()) return;
-        const box = el('div', { class: 'rr-msg-asst' });
-        box.appendChild(el('div', { class: 'rr-who' }, 'GROK'));
-        const body = el('div', { class: 'rr-body' }) as HTMLElement;
-        body.innerHTML = linkify(asstBuf.slice(0, 12000));
-        box.appendChild(body);
-        chunks.push(box);
-        asstBuf = '';
-      };
-
-      if (histRes.ok) {
-        const text = await histRes.text();
-        for (const line of text.split('\n')) {
-          if (!line.trim()) continue;
-          let ev: {
-            event?: string;
-            data?: { text?: string; update?: { content?: { text?: string } } };
-          };
-          try { ev = JSON.parse(line); } catch { continue; }
-          if (ev.event === 'user_message' && ev.data?.text) {
-            flushAsst();
-            const t = String(ev.data.text).trim();
-            if (!firstUser) firstUser = t;
-            chunks.push(el('div', { class: 'rr-msg-user' }, t.slice(0, 4000)));
-          } else if (ev.event === 'agent_message_chunk') {
-            const t = ev.data?.update?.content?.text;
-            if (t) asstBuf += String(t);
-          }
-        }
-        flushAsst();
-      }
-
-      if (firstUser) {
-        scroll.appendChild(el('div', { class: 'rr-quote' },
-          `"${firstUser.slice(0, 280)}${firstUser.length > 280 ? '…' : ''}"`,
-        ));
-      }
-      if (!chunks.length) {
-        scroll.appendChild(el('div', { class: 'rr-muted' },
-          hasLocal
-            ? 'No prior turns on disk yet. Send a short nudge below to resume on the host.'
-            : 'No local transcript. Type a follow-up to start fresh work on this host.',
-        ));
-      } else {
-        for (const c of chunks) scroll.appendChild(c);
-      }
-      // Ensure content is visible after paint
-      requestAnimationFrame(() => {
-        scroll.scrollTop = Math.min(scroll.scrollHeight, 200);
+      const turns = histRes.ok ? parseHistoryTurns(await histRes.text()) : [];
+      this.paintTurns(scroll, turns, {
+        stuckLabel,
+        infoBanner,
+        skipQuote: turns.length <= 1,
       });
+      scroll.scrollTop = scroll.scrollHeight;
+
+      // Live stream for replies / new tasks already running
+      this.connectStream(agentId, scroll);
+      if (open.agent?.status === 'running' || open.agent?.status === 'starting') {
+        this.setStatus(scroll, 'Working on host…');
+      }
     } catch (e) {
       scroll.replaceChildren();
       scroll.appendChild(el('div', { class: 'rr-error' }, e instanceof Error ? e.message : String(e)));
@@ -432,48 +653,48 @@ export class RemoteApp {
 
     const doSend = async (): Promise<void> => {
       const text = input.value.trim();
-      if (!text) return;
+      if (!text || !agentId) return;
       input.disabled = true;
       input.value = '';
-      scroll.appendChild(el('div', { class: 'rr-msg-user' }, text));
-      const thinking = el('div', { class: 'rr-muted' }, 'Working on host…');
-      scroll.appendChild(thinking);
+      // Reset live buffer so we only show NEW assistant text
+      this._liveAsstEl = null;
+      this._liveAsstText = '';
+      this._turnGotAsst = false;
+      scroll.appendChild(userBubble(text));
+      this.setStatus(scroll, 'Working on host…');
       scroll.scrollTop = scroll.scrollHeight;
       try {
         await apiPost(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { text });
-        // Poll history briefly for the reply
-        let found = false;
-        for (let attempt = 0; attempt < 12 && !found; attempt++) {
+        // Stream handles the reply; poll only if SSE never delivered.
+        for (let i = 0; i < 30 && !this._turnGotAsst; i++) {
           await new Promise((r) => setTimeout(r, 1500));
-          const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=12`, {
+          if (this._turnGotAsst) break;
+          const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=20`, {
             headers: { accept: 'application/x-ndjson' },
           });
           if (!histRes.ok) continue;
-          const lines = (await histRes.text()).trim().split('\n').filter(Boolean);
-          for (let i = lines.length - 1; i >= 0; i--) {
-            try {
-              const ev = JSON.parse(lines[i]!);
-              const t = ev?.data?.update?.content?.text;
-              if (ev.event === 'agent_message_chunk' && t && String(t).length > 2) {
-                thinking.remove();
-                const box = el('div', { class: 'rr-msg-asst' });
-                box.appendChild(el('div', { class: 'rr-who' }, 'GROK'));
-                const body = el('div', { class: 'rr-body' }) as HTMLElement;
-                body.innerHTML = linkify(String(t).slice(0, 8000));
-                box.appendChild(body);
-                scroll.appendChild(box);
-                found = true;
-                break;
-              }
-            } catch { /* continue */ }
+          const turns = parseHistoryTurns(await histRes.text());
+          let foundUser = false;
+          let reply: string | null = null;
+          for (const t of turns) {
+            if (t.role === 'user' && t.text.trim() === text.trim()) {
+              foundUser = true;
+              reply = null;
+              continue;
+            }
+            if (foundUser && t.role === 'asst') reply = t.text;
+          }
+          if (reply && !this._turnGotAsst) {
+            this.setStatus(scroll, null);
+            this.appendLiveAsst(scroll, reply);
+            break;
           }
         }
-        if (!found) {
-          thinking.textContent = 'Sent. Waiting for host reply — pull to refresh or reopen.';
+        if (!this._turnGotAsst) {
+          this.setStatus(scroll, 'Still working — reply will appear when ready.');
         }
-        scroll.scrollTop = scroll.scrollHeight;
       } catch (err) {
-        thinking.remove();
+        this.setStatus(scroll, null);
         scroll.appendChild(el('div', { class: 'rr-error' }, err instanceof Error ? err.message : String(err)));
       } finally {
         input.disabled = false;
@@ -490,20 +711,27 @@ export class RemoteApp {
   }
 
   renderNewTask(): void {
-    // Dimmed home under sheet
     this.renderHome();
     const sheet = el('div', { class: 'rr-sheet' },
       el('div', { class: 'rr-grab' }),
       el('h2', {}, 'New task'),
     );
-    const sel = el('select', { class: 'rr-select', id: 'rr-project' }) as HTMLSelectElement;
+    const sel = el('select', { class: 'rr-select', id: 'rr-project', 'aria-label': 'Project' }) as HTMLSelectElement;
     for (const g of this.projects) {
       const o = document.createElement('option');
-      o.value = g.cwd || '';
+      // Prefer real absolute cwd; skip nested agent workdirs as "project"
+      const cwd = g.cwd || '';
+      if (cwd.includes('.grok-remote/agents')) continue;
+      o.value = cwd;
       o.textContent = cleanLabel(g.projectLabel);
       sel.appendChild(o);
     }
-    if (!this.projects.length) {
+    // Always offer home
+    const home = document.createElement('option');
+    home.value = '';
+    home.textContent = 'home (/root)';
+    sel.appendChild(home);
+    if (!sel.options.length) {
       const o = document.createElement('option');
       o.value = '';
       o.textContent = 'home';
@@ -538,7 +766,11 @@ export class RemoteApp {
     const cwd = sel?.value || undefined;
     if (!text) return;
     try {
-      const r = await apiPost<{ agent: { id: string } }>('/api/remote/tasks', { text, cwd });
+      const r = await apiPost<{ agent: { id: string; name?: string } }>('/api/remote/tasks', {
+        text,
+        cwd: cwd || undefined,
+        name: text.slice(0, 80),
+      });
       navigate(`#/remote/s/${encodeURIComponent(r.agent.id)}`);
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));

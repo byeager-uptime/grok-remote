@@ -366,6 +366,14 @@ document.addEventListener('DOMContentLoaded', () => {
     return;
   }
 
+  // Advanced console is a separate mount. If the hash flips back to Remote,
+  // full-reload so this entrypoint can remount the phone shell.
+  window.addEventListener('hashchange', () => {
+    if (wantsRemoteShell()) {
+      location.reload();
+    }
+  });
+
   void pingHello();
   setInterval(() => { void pingHello(); }, 10000);
 
