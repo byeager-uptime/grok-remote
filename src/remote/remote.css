@@ -88,9 +88,18 @@ body.rr-mode .rr-host {
   position: relative;
 }
 
-/* Keyboard open: collapse chrome, free vertical room for text */
+/*
+ * Keyboard open (body.rr-kb):
+ * Apple/WebKit: env(safe-area-inset-bottom) does NOT go to 0 when the keyboard
+ * is up (WebKit #217754). Applying it creates the huge black gap above the
+ * keyboard. When kb is open, use near-zero bottom padding.
+ */
 body.rr-kb .rr-t2 { display: none !important; }
-body.rr-kb .rr-thread-header,
+body.rr-kb .rr-thread-header {
+  padding-top: max(4px, env(safe-area-inset-top, 0px)) !important;
+  padding-bottom: 2px !important;
+  background: rgba(0,0,0,.72) !important;
+}
 body.rr-kb .rr-header {
   padding-top: max(4px, env(safe-area-inset-top, 0px)) !important;
   padding-bottom: 4px !important;
@@ -98,11 +107,16 @@ body.rr-kb .rr-header {
 body.rr-kb .rr-t1 { font-size: 14px; }
 body.rr-kb .rr-work-wrap {
   padding-top: 4px !important;
-  padding-bottom: 6px !important;
+  padding-bottom: 4px !important; /* NOT safe-area — keyboard already inset */
+  border-top: none !important;
 }
-body.rr-kb .rr-work-bar { min-height: 44px; }
+body.rr-kb .rr-work-bar { min-height: 40px; }
+body.rr-kb .rr-composer-tools { display: none !important; } /* single-row while typing */
 body.rr-kb .rr-circ { width: 32px; height: 32px; }
-body.rr-kb .rr-quote { display: none; } /* reclaim space while typing */
+body.rr-kb .rr-quote { display: none; }
+body.rr-kb .rr-scroll { padding-bottom: 4px !important; }
+body.rr-kb .rr-foot,
+body.rr-kb .rr-bottom { display: none !important; }
 
 /* Tablet / desktop: comfortable reading column, still full height */
 @media (min-width: 640px) {
@@ -513,37 +527,58 @@ body.rr-kb #rr-thread-body.rr-scroll {
   color: #a3a3a3; /* contrast fix */
 }
 
-/* —— Thread view —— */
+/* —— Thread view (ChatGPT Remote–style: floating chrome over content) —— */
 .rr-thread-header {
   display: grid;
-  grid-template-columns: 40px 1fr 40px;
+  grid-template-columns: 40px 1fr auto;
   align-items: center;
-  gap: 4px;
-  padding: 6px 10px 8px;
-  /* PWA black-translucent draws under status bar — pad below notch/island. */
+  gap: 8px;
+  padding: 6px 12px 8px;
   padding-top: 12px;
   padding-top: max(12px, env(safe-area-inset-top, 0px));
-  padding-left: max(10px, env(safe-area-inset-left, 0px));
-  padding-right: max(10px, env(safe-area-inset-right, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
   flex-shrink: 0;
   width: 100%;
   box-sizing: border-box;
-  background: var(--rr-bg);
+  /* Frosted bar so messages can sit closer / under like ChatGPT */
+  background: linear-gradient(to bottom, rgba(0,0,0,.92) 55%, rgba(0,0,0,.55) 100%);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
   z-index: 5;
   position: relative;
-  border-bottom: 1px solid #141414;
+  border-bottom: none;
 }
 .rr-thread-header--simple {
-  grid-template-columns: 40px 1fr 40px;
+  grid-template-columns: 40px 1fr auto;
 }
-.rr-thread-titles { text-align: center; min-width: 0; padding: 0 4px; overflow: hidden; }
+.rr-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: var(--rr-elevated);
+  border-radius: 20px;
+  padding: 2px;
+  flex-shrink: 0;
+}
+.rr-header-actions .rr-circ {
+  background: transparent;
+  width: 34px;
+  height: 34px;
+}
+.rr-thread-titles {
+  text-align: left;
+  min-width: 0;
+  padding: 0 2px;
+  overflow: hidden;
+}
 .rr-t1 {
   font-size: 15px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.25;
+  line-height: 1.2;
 }
 .rr-t2 {
   font-size: 11px;
@@ -640,32 +675,72 @@ body.rr-kb #rr-thread-body.rr-scroll {
   margin-bottom: 6px;
 }
 
+/* Composer — ChatGPT Remote: pill docked tight, no fat dead zone above keyboard */
 .rr-work-wrap {
   flex-shrink: 0;
   padding: 6px 12px;
-  /* When keyboard open (rr-kb), bottom padding collapses — OS keyboard is the inset. */
-  padding-bottom: max(10px, env(safe-area-inset-bottom, 0px));
+  /* Home-indicator only when keyboard closed. Never double with keyboard. */
+  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
   padding-left: max(12px, env(safe-area-inset-left, 0px));
   padding-right: max(12px, env(safe-area-inset-right, 0px));
-  background: var(--rr-bg);
+  background: linear-gradient(to top, #000 70%, rgba(0,0,0,.0));
   width: 100%;
   box-sizing: border-box;
-  border-top: 1px solid #141414;
+  border-top: none;
 }
 .rr-work-bar {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 4px;
   background: var(--rr-elevated);
   border: 1px solid var(--rr-border);
-  border-radius: 24px;
-  padding: 4px 8px 4px 10px;
-  min-height: 48px;
+  border-radius: 22px;
+  padding: 8px 10px 6px;
+  min-height: 0;
   width: 100%;
   box-sizing: border-box;
 }
+.rr-work-bar input,
+.rr-work-bar textarea {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--rr-fg);
+  font-size: 16px;
+  outline: none;
+  font-family: inherit;
+  resize: none;
+  line-height: 1.35;
+  max-height: 96px;
+  padding: 2px 4px;
+}
+.rr-composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+}
+.rr-composer-tools-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.rr-composer-tools .rr-circ {
+  background: transparent;
+  width: 32px;
+  height: 32px;
+}
+.rr-composer-tools .rr-circ--send {
+  width: 34px;
+  height: 34px;
+}
+/* legacy single-row still works if present */
+.rr-work-bar > .rr-circ { flex-shrink: 0; }
 
-/* Pull-to-refresh */
+/* Pull-to-refresh (list: pull down; thread: pull up at bottom) */
 .rr-ptr {
   text-align: center;
   font-size: 12px;
@@ -675,12 +750,38 @@ body.rr-kb #rr-thread-body.rr-scroll {
   transition: height 0.15s ease, opacity 0.15s ease;
   opacity: 0;
   line-height: 36px;
+  flex-shrink: 0;
 }
 .rr-ptr--active {
   height: 36px;
   opacity: 1;
 }
 .rr-ptr--ready { color: var(--rr-fg); }
+.rr-ptr--bottom {
+  order: 99;
+}
+
+/* Jump-to-latest (ChatGPT chevron) */
+.rr-jump-latest {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  z-index: 6;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--rr-border);
+  background: var(--rr-elevated);
+  color: var(--rr-fg);
+  display: none;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+}
+.rr-jump-latest--show { display: grid; }
+body.rr-kb .rr-jump-latest { bottom: 56px; }
+.rr-jump-latest svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
 
 /* Overflow menu (⋯) */
 .rr-menu-backdrop {
@@ -728,22 +829,8 @@ body.rr-kb #rr-thread-body.rr-scroll {
   font-weight: 600;
   cursor: pointer;
 }
-.rr-work-bar input {
-  flex: 1;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  color: var(--rr-fg);
-  font-size: 16px; /* iOS: avoid zoom on focus */
-  outline: none;
-  width: 100%;
-}
-.rr-work-bar input::placeholder { color: var(--rr-muted); }
-.rr-work-bar .rr-circ {
-  background: transparent;
-  width: 32px;
-  height: 32px;
-}
+.rr-work-bar input::placeholder,
+.rr-work-bar textarea::placeholder { color: var(--rr-muted); }
 .rr-work-bar .rr-circ svg { width: 18px; height: 18px; }
 
 .rr-muted { color: var(--rr-muted); font-size: 14px; padding: 12px 0; line-height: 1.4; }

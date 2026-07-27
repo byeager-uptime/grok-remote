@@ -245,8 +245,12 @@ export class RemoteApp {
   /** True once this user turn already received assistant text (SSE or poll). */
   private _turnGotAsst = false;
   private _listPoll: ReturnType<typeof setInterval> | null = null;
+  private _histPoll: ReturnType<typeof setInterval> | null = null;
   private _sending = false;
   private _vvBound = false;
+  private _visBound = false;
+  private _lastHistFingerprint = '';
+  private _threadScroll: HTMLElement | null = null;
 
   constructor() {
     this.root = el('div', { class: 'rr-app' });
@@ -322,16 +326,34 @@ export class RemoteApp {
     this.root.appendChild(backdrop);
   }
 
-  /** Pull-to-refresh on a scroll container. */
-  private attachPullToRefresh(scroll: HTMLElement, onRefresh: () => Promise<void>): void {
-    const ptr = el('div', { class: 'rr-ptr' }, 'Pull to refresh');
-    scroll.prepend(ptr);
+  /**
+   * Pull-to-refresh.
+   * - mode 'down': classic pull-down at top (session list)
+   * - mode 'up': pull-up at bottom of thread (chat is usually scrolled to latest)
+   */
+  private attachPullToRefresh(
+    scroll: HTMLElement,
+    onRefresh: () => Promise<void>,
+    mode: 'down' | 'up' = 'down',
+  ): void {
+    const ptr = el('div', {
+      class: mode === 'up' ? 'rr-ptr rr-ptr--bottom' : 'rr-ptr',
+    }, mode === 'up' ? 'Pull up to refresh' : 'Pull to refresh');
+    if (mode === 'up') scroll.appendChild(ptr);
+    else scroll.prepend(ptr);
+
     let startY = 0;
     let pulling = false;
     let armed = false;
+    const idleLabel = mode === 'up' ? 'Pull up to refresh' : 'Pull to refresh';
+
+    const atBottom = (): boolean =>
+      scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 24;
+    const atTop = (): boolean => scroll.scrollTop <= 0;
 
     scroll.addEventListener('touchstart', (ev) => {
-      if (scroll.scrollTop > 0) { pulling = false; return; }
+      if (mode === 'down' && !atTop()) { pulling = false; return; }
+      if (mode === 'up' && !atBottom()) { pulling = false; return; }
       startY = ev.touches[0]?.clientY || 0;
       pulling = true;
       armed = false;
@@ -341,14 +363,17 @@ export class RemoteApp {
       if (!pulling) return;
       const y = ev.touches[0]?.clientY || 0;
       const dy = y - startY;
-      if (dy > 12 && scroll.scrollTop <= 0) {
+      // down: finger moves down (dy>0) at top; up: finger moves up (dy<0) at bottom
+      const dist = mode === 'down' ? dy : -dy;
+      const inZone = mode === 'down' ? atTop() : atBottom();
+      if (dist > 12 && inZone) {
         ptr.classList.add('rr-ptr--active');
-        if (dy > 64) {
+        if (dist > 56) {
           ptr.textContent = 'Release to refresh';
           ptr.classList.add('rr-ptr--ready');
           armed = true;
         } else {
-          ptr.textContent = 'Pull to refresh';
+          ptr.textContent = idleLabel;
           ptr.classList.remove('rr-ptr--ready');
           armed = false;
         }
@@ -360,17 +385,69 @@ export class RemoteApp {
       pulling = false;
       const doIt = armed;
       ptr.classList.remove('rr-ptr--active', 'rr-ptr--ready');
-      ptr.textContent = 'Pull to refresh';
+      ptr.textContent = idleLabel;
       if (doIt) {
         ptr.classList.add('rr-ptr--active');
         ptr.textContent = 'Refreshing…';
         void onRefresh().finally(() => {
           ptr.classList.remove('rr-ptr--active');
-          ptr.textContent = 'Pull to refresh';
+          ptr.textContent = idleLabel;
         });
       }
       armed = false;
     }, { passive: true });
+  }
+
+  private stopHistPoll(): void {
+    if (this._histPoll) {
+      clearInterval(this._histPoll);
+      this._histPoll = null;
+    }
+  }
+
+  /** While a thread is open: poll history + refresh on tab focus so long-lived PWAs stay current. */
+  private startThreadSync(agentId: string, scroll: HTMLElement): void {
+    this.stopHistPoll();
+    this._threadScroll = scroll;
+
+    const sync = async (reason: string): Promise<void> => {
+      if (parseRoute().name !== 'thread') return;
+      if (this._sending || this._liveAsstText) return; // don't clobber live stream mid-token
+      try {
+        const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
+          headers: { accept: 'application/x-ndjson' },
+        });
+        if (!histRes.ok) return;
+        const raw = await histRes.text();
+        // Cheap fingerprint: length + last 200 chars
+        const fp = `${raw.length}:${raw.slice(-200)}`;
+        if (fp === this._lastHistFingerprint) return;
+        this._lastHistFingerprint = fp;
+        const turns = parseHistoryTurns(raw);
+        const nearBottom =
+          scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80;
+        this.paintTurns(scroll, turns, { skipQuote: turns.length <= 1 });
+        if (nearBottom) {
+          requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
+        }
+        if (reason === 'visibility') this.toast('Conversation updated');
+      } catch { /* ignore */ }
+    };
+
+    this._histPoll = setInterval(() => { void sync('poll'); }, 12_000);
+
+    if (!this._visBound) {
+      this._visBound = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && this._threadAgentId) {
+          void sync('visibility');
+          // Re-open SSE after background (iOS often kills EventSource)
+          if (this._threadAgentId && this._threadScroll) {
+            this.connectStream(this._threadAgentId, this._threadScroll);
+          }
+        }
+      });
+    }
   }
 
   private startListPoll(): void {
@@ -408,11 +485,14 @@ export class RemoteApp {
       try { this._es.close(); } catch { /* ignore */ }
       this._es = null;
     }
+    this.stopHistPoll();
     this._liveAsstEl = null;
     this._liveAsstText = '';
     this._statusEl = null;
     this._threadAgentId = null;
     this._turnGotAsst = false;
+    this._threadScroll = null;
+    this._lastHistFingerprint = '';
   }
 
   async bootstrap(): Promise<void> {
@@ -696,10 +776,14 @@ export class RemoteApp {
     infoBanner?: string | null;
     skipQuote?: boolean;
   }): void {
-    // Keep pull-to-refresh node if present
-    const ptr = scroll.querySelector('.rr-ptr');
+    // Keep pull-to-refresh nodes if present (top and/or bottom)
+    const ptrs = [...scroll.querySelectorAll('.rr-ptr')];
     scroll.replaceChildren();
-    if (ptr) scroll.appendChild(ptr);
+    for (const p of ptrs) {
+      if (p.classList.contains('rr-ptr--bottom')) continue; // re-append after content
+      scroll.appendChild(p);
+    }
+    const bottomPtrs = ptrs.filter((p) => p.classList.contains('rr-ptr--bottom'));
     if (opts?.stuckLabel) {
       scroll.appendChild(el('div', { class: 'rr-soft-stuck' }, opts.stuckLabel));
     }
@@ -720,11 +804,18 @@ export class RemoteApp {
       scroll.appendChild(el('div', { class: 'rr-muted' },
         'No messages yet. Type a nudge below.',
       ));
-      return;
+    } else {
+      for (const t of turns) {
+        scroll.appendChild(t.role === 'user' ? userBubble(t.text) : asstBubble(t.text));
+      }
     }
-    for (const t of turns) {
-      scroll.appendChild(t.role === 'user' ? userBubble(t.text) : asstBubble(t.text));
-    }
+    for (const p of bottomPtrs) scroll.appendChild(p);
+  }
+
+  private insertBeforeBottomPtr(scroll: HTMLElement, node: HTMLElement): void {
+    const bottom = scroll.querySelector('.rr-ptr--bottom');
+    if (bottom) scroll.insertBefore(node, bottom);
+    else scroll.appendChild(node);
   }
 
   private appendLiveAsst(scroll: HTMLElement, chunk: string): void {
@@ -732,7 +823,7 @@ export class RemoteApp {
     this._turnGotAsst = true;
     if (!this._liveAsstEl) {
       this._liveAsstEl = asstBubble(this._liveAsstText);
-      scroll.appendChild(this._liveAsstEl);
+      this.insertBeforeBottomPtr(scroll, this._liveAsstEl);
     } else {
       const body = this._liveAsstEl.querySelector('.rr-body') as HTMLElement | null;
       if (body) body.innerHTML = formatMessage(this._liveAsstText.slice(0, 16000));
@@ -747,7 +838,7 @@ export class RemoteApp {
     }
     if (!text) return;
     this._statusEl = el('div', { class: 'rr-muted rr-live-status' }, text);
-    scroll.appendChild(this._statusEl);
+    this.insertBeforeBottomPtr(scroll, this._statusEl);
     scroll.scrollTop = scroll.scrollHeight;
   }
 
@@ -773,6 +864,10 @@ export class RemoteApp {
         if (t) {
           this.setStatus(scroll, null);
           this.appendLiveAsst(scroll, String(t));
+          // Keep view pinned to streaming tokens when user is following live
+          const nearBottom =
+            scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 120;
+          if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
         }
         return;
       }
@@ -840,27 +935,33 @@ export class RemoteApp {
       }
     }
 
+    // ChatGPT Remote header: back · title/host · (compose + more) pill
     const header = el('div', { class: 'rr-thread-header rr-thread-header--simple' });
     const back = svgBtn(iconBack(), 'rr-circ', 'Back');
     back.onclick = () => navigate('#/remote');
     header.appendChild(back);
-    // Single-line title by default; host only when keyboard closed (CSS hides on rr-kb)
     const titles = el('div', { class: 'rr-thread-titles' },
       el('div', { class: 'rr-t1', id: 'rr-t1' }, title),
       el('div', { class: 'rr-t2', id: 'rr-t2' }, this.hostLabel),
     );
     header.appendChild(titles);
+    const actions = el('div', { class: 'rr-header-actions' });
+    const neu = svgBtn(iconCompose(), 'rr-circ', 'New task');
+    neu.onclick = () => navigate('#/remote/new');
     const moreBtn = svgBtn(iconMore(), 'rr-circ', 'More options');
     moreBtn.onclick = () => {
       this.openOverflowMenu([
         {
           label: 'Refresh conversation',
-          action: () => { void this.render(); this.toast('Conversation refreshed'); },
+          action: () => {
+            void (async () => {
+              const route = parseRoute();
+              if (route.name === 'thread') await this.renderThread(route.sessionId);
+              this.toast('Conversation refreshed');
+            })();
+          },
         },
-        {
-          label: 'New task',
-          action: () => navigate('#/remote/new'),
-        },
+        { label: 'New task', action: () => navigate('#/remote/new') },
         {
           label: 'Copy session id',
           action: () => {
@@ -870,47 +971,68 @@ export class RemoteApp {
             );
           },
         },
-        {
-          label: 'Reload app',
-          action: () => { location.reload(); },
-        },
+        { label: 'Reload app', action: () => { location.reload(); } },
         {
           label: 'Advanced console',
           action: () => { location.hash = '#/advanced'; location.reload(); },
         },
       ]);
     };
-    header.appendChild(moreBtn);
+    actions.appendChild(neu);
+    actions.appendChild(moreBtn);
+    header.appendChild(actions);
 
     const scroll = el('div', { class: 'rr-scroll', id: 'rr-thread-body' });
+    // Pull UP at bottom of chat to refresh (natural when reading latest)
     this.attachPullToRefresh(scroll, async () => {
-      // Soft re-render of this thread
       const route = parseRoute();
       if (route.name === 'thread') {
         await this.renderThread(route.sessionId);
+        this.toast('Conversation refreshed');
       }
-    });
+    }, 'up');
     scroll.appendChild(el('div', { class: 'rr-muted' }, 'Opening…'));
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.placeholder = 'Message Grok';
-    input.enterKeyHint = 'send';
-    input.autocomplete = 'off';
-    input.autocapitalize = 'sentences';
-    // Keep iOS from zooming / reduce accessory chrome where possible
+    // ChatGPT-style two-tier composer: input row + tools row
+    const input = document.createElement('textarea');
+    input.rows = 1;
+    input.placeholder = `Work on ${this.hostLabel}`;
     input.setAttribute('enterkeyhint', 'send');
     input.setAttribute('inputmode', 'text');
+    input.autocomplete = 'off';
+    input.autocapitalize = 'sentences';
+    input.addEventListener('input', () => {
+      input.style.height = 'auto';
+      input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+    });
 
     const plus = svgBtn(iconPlus(), 'rr-circ', 'Attach');
     plus.disabled = true;
     const sendBtn = svgBtn(iconSend(), 'rr-circ rr-circ--send', 'Send');
-    const work = el('div', { class: 'rr-work-wrap' },
-      el('div', { class: 'rr-work-bar' }, plus, input, sendBtn),
+    const tools = el('div', { class: 'rr-composer-tools' },
+      el('div', { class: 'rr-composer-tools-left' }, plus),
+      sendBtn,
     );
+    const work = el('div', { class: 'rr-work-wrap' },
+      el('div', { class: 'rr-work-bar' }, input, tools),
+    );
+
+    // Jump-to-latest chip (ChatGPT ↓)
+    const jump = el('button', {
+      class: 'rr-jump-latest',
+      type: 'button',
+      'aria-label': 'Jump to latest',
+      html: '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
+    }) as HTMLButtonElement;
+    jump.onclick = () => { scroll.scrollTop = scroll.scrollHeight; };
+    scroll.addEventListener('scroll', () => {
+      const nearBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 100;
+      jump.classList.toggle('rr-jump-latest--show', !nearBottom);
+    }, { passive: true });
 
     this.root.appendChild(header);
     this.root.appendChild(scroll);
+    this.root.appendChild(jump);
     this.root.appendChild(work);
 
     let agentId = sessionId;
@@ -972,14 +1094,17 @@ export class RemoteApp {
         scroll.scrollTop = scroll.scrollHeight;
       });
 
-      // Live stream for replies / new tasks already running
+      // Live token stream + background history sync for long-lived PWA tabs
       this.connectStream(agentId, scroll);
+      this.startThreadSync(agentId, scroll);
       if (open.agent?.status === 'running' || open.agent?.status === 'starting') {
         this.setStatus(scroll, 'Working on host…');
       }
-      input.focus();
+      // Don't auto-focus on open (pops keyboard + wastes space). Focus on tap.
     } catch (e) {
+      const ptr = scroll.querySelector('.rr-ptr');
       scroll.replaceChildren();
+      if (ptr) scroll.appendChild(ptr);
       scroll.appendChild(el('div', { class: 'rr-error' }, e instanceof Error ? e.message : String(e)));
     }
 
@@ -990,6 +1115,7 @@ export class RemoteApp {
       input.disabled = true;
       sendBtn.disabled = true;
       input.value = '';
+      input.style.height = 'auto';
       // Reset live buffer so we only show NEW assistant text
       this._liveAsstEl = null;
       this._liveAsstText = '';
@@ -998,10 +1124,14 @@ export class RemoteApp {
       this.setStatus(scroll, 'Working on host…');
       scroll.scrollTop = scroll.scrollHeight;
       try {
+        // Ensure SSE is live before prompt so tokens stream into UI
+        if (!this._es || this._es.readyState === EventSource.CLOSED) {
+          this.connectStream(agentId, scroll);
+        }
         await apiPost(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { text });
         // Stream handles the reply; poll only if SSE never delivered.
-        for (let i = 0; i < 30 && !this._turnGotAsst; i++) {
-          await new Promise((r) => setTimeout(r, 1500));
+        for (let i = 0; i < 40 && !this._turnGotAsst; i++) {
+          await new Promise((r) => setTimeout(r, 1200));
           if (this._turnGotAsst) break;
           const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=20`, {
             headers: { accept: 'application/x-ndjson' },
