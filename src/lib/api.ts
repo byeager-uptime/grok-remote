@@ -112,6 +112,9 @@ export const api = {
   agentsStreamUrl: (): string => withAuthQuery('/api/agents/stream'),
   getAgent:     (id: string): Promise<unknown>          => request('GET',    `/api/agents/${encodeURIComponent(id)}`),
   createAgent:  (body?: Record<string, unknown>): Promise<unknown>  => request('POST',   '/api/agents', body || {}),
+  syncSessions: (): Promise<unknown> => request('POST', '/api/agents/sync-sessions', {}),
+  importSession:(body: { sessionId: string; name?: string; cwd?: string; connect?: boolean }): Promise<unknown> =>
+    request('POST', '/api/agents/import-session', body),
   deleteAgent:  (id: string): Promise<unknown>          => request('DELETE', `/api/agents/${encodeURIComponent(id)}`),
   updateAgent:  (id: string, patch?: Record<string, unknown>): Promise<unknown>   => request('PATCH',  `/api/agents/${encodeURIComponent(id)}`, patch || {}),
   setAgentFolder: (id: string, folderId: string | null): Promise<unknown> =>

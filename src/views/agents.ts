@@ -384,13 +384,28 @@ export class AgentsSidebar {
 
   mount(parent: HTMLElement): void {
     parent.appendChild(this.root);
-    void this.refresh();
-    void this.refreshFolders();
+    // Pull CLI/disk sessions into the sidebar so existing server work shows up.
+    void this.syncHostSessions().finally(() => {
+      void this.refresh();
+      void this.refreshFolders();
+    });
     this._startSseStream();
     this.startPolling();
     if (!this._spawnHandlerWired) {
       document.addEventListener('grok-remote:spawn-agent', () => void this.spawnNew());
       this._spawnHandlerWired = true;
+    }
+  }
+
+  async syncHostSessions(): Promise<void> {
+    try {
+      await api.syncSessions();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      try {
+        this.error.textContent = `session sync: ${msg}`;
+        this.error.hidden = false;
+      } catch { /* ignore */ }
     }
   }
 

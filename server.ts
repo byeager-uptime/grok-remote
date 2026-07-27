@@ -24,6 +24,7 @@ import { readAll as readHistory } from './lib/history.js';
 import { writeHeaders as sseHeaders, writeEvent as sseWrite, writePing as ssePing } from './lib/sse.js';
 import { buildTrace, buildTraceForSessionId } from './lib/trace-host.js';
 import { handleSystem } from './lib/routes/system.js';
+import { setSessionsManager } from './lib/routes/system/sessions.js';
 import { runGrokText, errorToResponse } from './lib/grok-cli.js';
 import {
   readCurrentVersion,
@@ -70,6 +71,7 @@ const MIME: Record<string, string> = {
 };
 
 const manager = new AgentManager();
+setSessionsManager(manager);
 
 interface TailscaleIdentity {
   backend: string;
@@ -305,6 +307,41 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: string,
     return;
   }
 
+  if (url === '/api/agents/sync-sessions' && method === 'POST') {
+    try {
+      const result = await manager.syncHostSessions(50);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { ok: false, error: msg });
+    }
+    return;
+  }
+
+  if (url === '/api/agents/import-session' && method === 'POST') {
+    try {
+      const body = (await readJsonBody(req) || {}) as {
+        sessionId?: string; name?: string; cwd?: string; connect?: boolean;
+      };
+      if (!body.sessionId || typeof body.sessionId !== 'string') {
+        sendJson(res, 400, { ok: false, error: 'sessionId required' });
+        return;
+      }
+      const agent = await manager.importHostSession({
+        sessionId: body.sessionId,
+        name: typeof body.name === 'string' ? body.name : undefined,
+        cwd: typeof body.cwd === 'string' ? body.cwd : undefined,
+        connect: body.connect === true,
+        seedHistory: true,
+      });
+      sendJson(res, 200, { ok: true, agent });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { ok: false, error: msg });
+    }
+    return;
+  }
+
   if (url === '/api/agents/stream' && method === 'GET') {
     handleAgentsStream(req, res);
     return;
@@ -466,6 +503,18 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: string,
       }
       if (typeof settings['alwaysApprove'] !== 'boolean' && typeof defaults.autoApprove === 'boolean') {
         settings['alwaysApprove'] = defaults.autoApprove;
+      }
+      // Import path: body.sessionId → resume host session into sidebar.
+      if (typeof body['sessionId'] === 'string' && body['sessionId']) {
+        const rec = await manager.importHostSession({
+          sessionId: body['sessionId'] as string,
+          name: typeof body['name'] === 'string' ? body['name'] as string : undefined,
+          cwd: typeof body['cwd'] === 'string' ? body['cwd'] as string : undefined,
+          connect: body['connect'] === true,
+          seedHistory: true,
+        });
+        sendJson(res, 201, rec);
+        return;
       }
       const merged = {
         ...body,
@@ -1375,6 +1424,13 @@ server.listen(PORT, HOST, () => {
       'access + GROK_REMOTE_TOKEN, or HOST=127.0.0.1 with an SSH/Tailscale tunnel.',
     );
   }
+  // Pull existing CLI/disk sessions into the chats sidebar so the UI isn't empty.
+  void manager.syncHostSessions(50).then((r) => {
+    console.log(`[grok-remote] synced host sessions: imported=${r.imported} total=${r.total} agents=${r.agents.length}`);
+  }).catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[grok-remote] session sync failed: ${msg}`);
+  });
 });
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {

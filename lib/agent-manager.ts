@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 import { AcpClient, type AcpClientSettings } from './acp-client.js';
 import { ensureAgentDirs, agentDir, historyPath, append as historyAppend } from './history.js';
 import { createRing, type SseRing, type SseRingEntry } from './sse.js';
+// historyPath used by importHostSession for empty-check
 
 const SSE_RING_LIMIT = 200;
 const AGENTS_ROOT = path.join(os.homedir(), '.grok-remote', 'agents');
@@ -69,6 +70,10 @@ export interface AgentSpawnOptions {
   model?: string;
   cwd?: string;
   settings?: AcpClientSettings | null;
+  /** Resume an existing Grok session id (from CLI / disk). */
+  sessionId?: string;
+  /** When false, create the agent record without starting the process. */
+  connect?: boolean;
 }
 
 export interface AgentPatch {
@@ -568,8 +573,24 @@ export class AgentManager extends EventEmitter {
     client.on('stderr', (chunk: string) => emitEvent('stderr', { chunk }));
   }
 
-  async spawn({ name, model, cwd, settings }: AgentSpawnOptions = {}): Promise<PublicAgent> {
-    const id = randomUUID();
+  async spawn({
+    name,
+    model,
+    cwd,
+    settings,
+    sessionId,
+    connect = true,
+  }: AgentSpawnOptions = {}): Promise<PublicAgent> {
+    // Reuse an existing agent that already points at this session.
+    if (sessionId) {
+      for (const a of this.agents.values()) {
+        if (a.lastSessionId === sessionId || a.id === sessionId) {
+          return this._publicRecord(a);
+        }
+      }
+    }
+
+    const id = sessionId && !this.agents.has(sessionId) ? sessionId : randomUUID();
     ensureAgentDirs(id);
     const dir = agentDir(id);
     const workCwd = cwd && fs.existsSync(cwd) ? path.resolve(cwd) : path.join(dir, 'cwd');
@@ -578,13 +599,13 @@ export class AgentManager extends EventEmitter {
     const ring = createRing<AgentRingEntry>(SSE_RING_LIMIT);
     const record: AgentRecord = {
       id,
-      name: name || `agent-${id.slice(0, 8)}`,
+      name: name || (sessionId ? `session-${sessionId.slice(0, 8)}` : `agent-${id.slice(0, 8)}`),
       autoNamed: !name,
       modelHint: model || null,
       cwd: workCwd,
       createdAt: nowIso(),
       lastSeen: nowIso(),
-      lastSessionId: null,
+      lastSessionId: sessionId || null,
       lastError: null,
       starred: false,
       archived: false,
@@ -592,18 +613,103 @@ export class AgentManager extends EventEmitter {
       settings: settings && typeof settings === 'object' ? settings : null,
       client: null,
       ring,
-      status: 'starting',
+      status: connect ? 'starting' : 'disconnected',
       eventCounter: 0,
     };
     this.agents.set(id, record);
     writeMeta(record);
 
-    historyAppend(id, { at: nowIso(), event: 'agent_created', data: { id, name: record.name, cwd: workCwd } });
+    historyAppend(id, {
+      at: nowIso(),
+      event: 'agent_created',
+      data: { id, name: record.name, cwd: workCwd, sessionId: sessionId || null },
+    });
 
-    this._connectRecord(record);
+    if (connect) this._connectRecord(record);
     const pub = this._publicRecord(record);
     this.emit('list_changed', { event: 'agent_added', agent: pub });
     return pub;
+  }
+
+  /**
+   * Import a host Grok session into the sidebar as a (usually disconnected)
+   * agent, seeding chat history from disk when available.
+   */
+  async importHostSession(opts: {
+    sessionId: string;
+    name?: string;
+    cwd?: string;
+    connect?: boolean;
+    seedHistory?: boolean;
+  }): Promise<PublicAgent> {
+    const { sessionId, connect = false, seedHistory = true } = opts;
+    if (!sessionId) throw new Error('sessionId required');
+
+    for (const a of this.agents.values()) {
+      if (a.lastSessionId === sessionId || a.id === sessionId) {
+        return this._publicRecord(a);
+      }
+    }
+
+    const { findSessionDir, seedHistoryFromSession } = await import('./session-index.js');
+    const sessionDir = findSessionDir(sessionId);
+    let cwd = opts.cwd;
+    let name = opts.name;
+    if (sessionDir) {
+      try {
+        const sum = JSON.parse(fs.readFileSync(path.join(sessionDir, 'summary.json'), 'utf8')) as {
+          generated_title?: string;
+          session_summary?: string;
+          info?: { cwd?: string };
+        };
+        if (!name) name = sum.generated_title || sum.session_summary || undefined;
+        if (!cwd && sum.info?.cwd) cwd = sum.info.cwd;
+      } catch { /* ignore */ }
+    }
+    if (!cwd || !fs.existsSync(cwd)) cwd = os.homedir();
+
+    const pub = await this.spawn({
+      name: name || `session-${sessionId.slice(0, 8)}`,
+      cwd,
+      sessionId,
+      connect,
+    });
+
+    if (seedHistory && sessionDir) {
+      const existing = historyPath(sessionId);
+      let empty = true;
+      try {
+        const raw = fs.readFileSync(existing, 'utf8');
+        // Only the agent_created line → treat as empty of turns.
+        empty = !raw.includes('"user_message"');
+      } catch { empty = true; }
+      if (empty) {
+        seedHistoryFromSession(sessionDir, pub.id, (id, rec) => historyAppend(id, rec));
+      }
+    }
+
+    return this.get(pub.id) || pub;
+  }
+
+  /** Pull recent host sessions into the agents sidebar (no auto-connect). */
+  async syncHostSessions(limit: number = 40): Promise<{ imported: number; total: number; agents: PublicAgent[] }> {
+    const { listHostSessions } = await import('./session-index.js');
+    const { items } = await listHostSessions({ limit });
+    let imported = 0;
+    for (const s of items) {
+      if (s.isSubagent) continue;
+      // Skip empty/tiny noise sessions without a real title when possible? Keep all CLI rows.
+      const before = this.agents.size;
+      await this.importHostSession({
+        sessionId: s.sessionId,
+        name: s.summary && s.summary !== '(no summary)' ? s.summary : undefined,
+        cwd: s.cwd || undefined,
+        connect: false,
+        seedHistory: true,
+      });
+      if (this.agents.size > before) imported++;
+    }
+    return { imported, total: items.length, agents: this.list() };
   }
 
   private _connectRecord(record: AgentRecord): AcpClient {

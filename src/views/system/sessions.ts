@@ -5,8 +5,10 @@ import { api } from '../../lib/api.js';
 interface SessionItem {
   sessionId: string;
   created?: string;
+  updated?: string;
   status?: string;
   summary?: string;
+  cwd?: string;
 }
 
 interface SessionsState {
@@ -27,7 +29,7 @@ let state: SessionsState = freshState();
 function freshState(): SessionsState {
   return {
     q: '',
-    limit: 20,
+    limit: 50,
     loading: false,
     error: null,
     raw: '',
@@ -133,15 +135,12 @@ function render(): void {
     ? state.items.map((it) => {
         const hasAgent = state.agentIds.has(it.sessionId);
         const btnHtml = hasAgent
-          ? `<button class="sessions-use" data-sid="${escapeHtml(it.sessionId)}" type="button">use in dashboard</button>`
-          : `<button class="sessions-use sessions-use--disabled" data-sid="${escapeHtml(it.sessionId)}" type="button"
-                   title="this session was created in the grok TUI, not in this dashboard. import it first.">
-               import first
-             </button>`;
+          ? `<button class="sessions-use" data-sid="${escapeHtml(it.sessionId)}" data-cwd="${escapeHtml(it.cwd || '')}" data-name="${escapeHtml(it.summary || '')}" type="button">open chat</button>`
+          : `<button class="sessions-use" data-sid="${escapeHtml(it.sessionId)}" data-cwd="${escapeHtml(it.cwd || '')}" data-name="${escapeHtml(it.summary || '')}" type="button">open in chats</button>`;
         return `
           <tr class="sessions-row" data-sid="${escapeHtml(it.sessionId)}">
             <td class="sessions-id"  title="${escapeHtml(it.sessionId)}"><code>${escapeHtml(truncId(it.sessionId))}</code></td>
-            <td class="sessions-cre">${escapeHtml(it.created)}</td>
+            <td class="sessions-cre">${escapeHtml(it.updated || it.created)}</td>
             <td class="sessions-st">${escapeHtml(it.status)}</td>
             <td class="sessions-sum">${escapeHtml(it.summary)}</td>
             <td class="sessions-act">${btnHtml}</td>
@@ -157,9 +156,8 @@ function render(): void {
     <section class="system-page sessions-page">
       <h2 class="system-page-title">Sessions</h2>
       <p class="system-page-sub">
-        all Grok sessions on this host (cross-cwd index + CLI).
-        sidebar “chats” are grok-remote agents; this page is full session history.
-        click a row to copy its session id.
+        every Grok session on this host (CLI + disk). Use <strong>open in chats</strong>
+        to put one in the sidebar, or <strong>sync all to chats</strong> to import them all.
       </p>
 
       <div class="sessions-controls">
@@ -179,6 +177,7 @@ function render(): void {
           title="max rows to return"
         />
         <button class="sessions-refresh" type="button">${state.loading ? 'loading...' : 'refresh'}</button>
+        <button class="sessions-sync" type="button">sync all to chats</button>
         ${state.toast ? `<span class="sessions-toast">${escapeHtml(state.toast)}</span>` : ''}
       </div>
 
@@ -222,6 +221,7 @@ function wire(): void {
   const qInput     = activeContainer.querySelector('.sessions-q') as HTMLInputElement | null;
   const limitInput = activeContainer.querySelector('.sessions-limit') as HTMLInputElement | null;
   const refreshBtn = activeContainer.querySelector('.sessions-refresh') as HTMLButtonElement | null;
+  const syncBtn    = activeContainer.querySelector('.sessions-sync') as HTMLButtonElement | null;
 
   if (qInput) {
     qInput.addEventListener('input', (e: Event) => { state.q = (e.target as HTMLInputElement).value; });
@@ -235,7 +235,7 @@ function wire(): void {
   if (limitInput) {
     limitInput.addEventListener('input', (e: Event) => {
       const n = parseInt((e.target as HTMLInputElement).value, 10);
-      state.limit = Number.isFinite(n) && n > 0 ? n : 20;
+      state.limit = Number.isFinite(n) && n > 0 ? n : 50;
     });
     limitInput.addEventListener('keydown', (e: KeyboardEvent) => {
       if (e.key === 'Enter') {
@@ -246,6 +246,24 @@ function wire(): void {
   }
   if (refreshBtn) {
     refreshBtn.addEventListener('click', () => void load());
+  }
+  if (syncBtn) {
+    syncBtn.addEventListener('click', () => {
+      void (async () => {
+        syncBtn.disabled = true;
+        showToast('syncing…');
+        try {
+          const r = await api.syncSessions() as { imported?: number; total?: number; agents?: unknown[] };
+          showToast(`synced ${r.imported ?? 0} new / ${r.total ?? 0} host sessions`);
+          await loadAgents();
+          void load();
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : String(err));
+        } finally {
+          syncBtn.disabled = false;
+        }
+      })();
+    });
   }
 
   const rows = activeContainer.querySelectorAll('.sessions-row');
@@ -264,11 +282,24 @@ function wire(): void {
       e.stopPropagation();
       const sid = btn.getAttribute('data-sid');
       if (!sid) return;
-      if (btn.classList.contains('sessions-use--disabled')) {
-        showToast('session lives in the grok TUI. open the Import page first.');
-        return;
-      }
-      window.location.hash = `#/agents/${sid}`;
+      const name = btn.getAttribute('data-name') || undefined;
+      const cwd = btn.getAttribute('data-cwd') || undefined;
+      void (async () => {
+        try {
+          showToast('opening…');
+          const r = await api.importSession({
+            sessionId: sid,
+            name: name && name !== '(no summary)' ? name : undefined,
+            cwd: cwd || undefined,
+            connect: false,
+          }) as { agent?: { id?: string } };
+          const id = r?.agent?.id || sid;
+          showToast('opened in chats');
+          window.location.hash = `#/agents/${encodeURIComponent(id)}`;
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : String(err));
+        }
+      })();
     });
   });
 }
