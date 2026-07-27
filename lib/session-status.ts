@@ -16,12 +16,18 @@ export interface StatusInput {
   lastCompleted?: boolean;
   /** Explicit permission wait. */
   awaitingPermission?: boolean;
+  /**
+   * False for cloud-only CLI "remote" rows with no files on this host.
+   * Those are archives — never red "needs you" stuck.
+   */
+  hasLocalContent?: boolean;
 }
 
 const STUCK_MS = 45 * 60 * 1000; // 45m with no progress while "busy" → stuck
 
 function ageMs(iso: string | null | undefined): number | null {
   if (!iso) return null;
+  // Date-only strings (YYYY-MM-DD) parse as UTC midnight — still fine for day-scale triage.
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return null;
   return Date.now() - t;
@@ -35,6 +41,11 @@ export function deriveSessionStatus(input: StatusInput): SessionTriageStatus {
   const status = (input.agentStatus || '').toLowerCase();
   const inFlight = typeof input.inFlight === 'number' ? input.inFlight : 0;
   const age = ageMs(input.lastSeen || input.updated);
+
+  // Cloud archive / no host files: never "stuck" (can't resume mid-turn here).
+  if (input.hasLocalContent === false && !input.connected) {
+    return 'done';
+  }
 
   if (input.awaitingPermission) return 'stuck';
   if (input.lastFailed && !input.connected) return 'stuck';
@@ -53,9 +64,9 @@ export function deriveSessionStatus(input: StatusInput): SessionTriageStatus {
   if (input.lastFailed) return 'stuck';
   if (status === 'errored' || status === 'killed') return 'stuck';
 
-  // Mid-turn disconnect: if lastSeen is "recent" relative to updated and not completed
+  // Mid-turn disconnect: recent host activity, incomplete work.
+  // Do NOT use mere "agent imported" lastSeen — callers must pass host updated.
   if (!input.lastCompleted && age != null && age < 24 * 60 * 60 * 1000 && age > 30 * 60 * 1000) {
-    // Between 30m and 24h of silence after incomplete work → stuck
     return 'stuck';
   }
 

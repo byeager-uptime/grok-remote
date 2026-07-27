@@ -13,9 +13,19 @@
   --rr-red: #ef4444;
 }
 
+/* Full-viewport lock: no horizontal scroll, safe-area aware. */
+html:has(body.rr-mode),
 body.rr-mode {
+  width: 100% !important;
+  max-width: 100vw !important;
+  height: 100% !important;
+  height: 100dvh !important;
+  overflow: hidden !important;
+  overflow-x: hidden !important;
   background: var(--rr-bg) !important;
   color: var(--rr-fg);
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
 }
 
 body.rr-mode .topbar,
@@ -27,29 +37,52 @@ body.rr-mode #open-settings,
 body.rr-mode #topbar-bg,
 body.rr-mode #hamburger-btn,
 body.rr-mode .brand,
-body.rr-mode header.topbar {
+body.rr-mode header.topbar,
+body.rr-mode::before {
   display: none !important;
 }
 
 body.rr-mode #app,
-body.rr-mode .app {
+body.rr-mode .app,
+body.rr-mode .rr-host {
   margin: 0 !important;
   padding: 0 !important;
   max-width: none !important;
+  width: 100% !important;
+  height: 100% !important;
   min-height: 100dvh;
   background: var(--rr-bg);
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  box-sizing: border-box !important;
 }
 
 .rr-app {
   display: flex;
   flex-direction: column;
-  min-height: 100dvh;
-  max-width: 520px;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
   margin: 0 auto;
   background: var(--rr-bg);
   color: var(--rr-fg);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
+  box-sizing: border-box;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Tablet / desktop: comfortable reading column, still full height */
+@media (min-width: 640px) {
+  .rr-app {
+    max-width: 560px;
+    border-left: 1px solid #141414;
+    border-right: 1px solid #141414;
+  }
 }
 
 /* —— Header (Remote list) —— */
@@ -59,8 +92,12 @@ body.rr-mode .app {
   align-items: center;
   gap: 2px;
   padding: 8px 12px 10px;
-  padding-top: max(10px, env(safe-area-inset-top));
+  padding-top: max(10px, env(safe-area-inset-top, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
   flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .rr-circ {
@@ -75,6 +112,8 @@ body.rr-mode .app {
   cursor: pointer;
   flex-shrink: 0;
   padding: 0;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 .rr-circ svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .rr-circ--white {
@@ -82,11 +121,13 @@ body.rr-mode .app {
   color: #111;
 }
 .rr-circ--white svg { stroke: #111; }
+.rr-circ:disabled { opacity: 0.4; cursor: default; }
 
 .rr-header-center {
   text-align: center;
   min-width: 0;
   line-height: 1.15;
+  overflow: hidden;
 }
 .rr-header-title {
   font-size: 17px;
@@ -102,8 +143,12 @@ body.rr-mode .app {
   font-size: 12px;
   color: var(--rr-muted);
   font-weight: 400;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.rr-header-host svg { width: 12px; height: 12px; opacity: 0.85; stroke: currentColor; fill: none; stroke-width: 1.75; }
+.rr-header-host svg { width: 12px; height: 12px; opacity: 0.85; stroke: currentColor; fill: none; stroke-width: 1.75; flex-shrink: 0; }
 .rr-host-dot {
   width: 7px;
   height: 7px;
@@ -114,10 +159,17 @@ body.rr-mode .app {
 
 /* —— Scroll / list —— */
 .rr-scroll {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  padding: 4px 18px 16px;
+  overflow-x: hidden;
+  padding: 4px 16px 16px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .rr-h1 {
@@ -144,7 +196,7 @@ body.rr-mode .app {
   flex-shrink: 0;
 }
 
-.rr-project { margin-bottom: 4px; }
+.rr-project { margin-bottom: 4px; width: 100%; }
 
 .rr-proj-head {
   display: flex;
@@ -160,6 +212,9 @@ body.rr-mode .app {
   cursor: pointer;
   text-align: left;
   min-height: 44px;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 .rr-proj-head svg.rr-folder {
   width: 18px;
@@ -172,11 +227,18 @@ body.rr-mode .app {
   stroke-linejoin: round;
   opacity: 0.95;
 }
-.rr-proj-name { flex: 1; min-width: 0; }
+.rr-proj-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .rr-proj-chev {
   color: var(--rr-dim);
   font-size: 10px;
   margin-left: 2px;
+  flex-shrink: 0;
 }
 .rr-proj-ext {
   width: 32px;
@@ -189,6 +251,7 @@ body.rr-mode .app {
   background: transparent;
   cursor: pointer;
   padding: 0;
+  -webkit-tap-highlight-color: transparent;
 }
 .rr-proj-ext svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.75; }
 
@@ -197,6 +260,7 @@ body.rr-mode .app {
   align-items: center;
   gap: 10px;
   width: 100%;
+  max-width: 100%;
   padding: 11px 8px 11px 26px;
   background: transparent;
   border: none;
@@ -208,6 +272,9 @@ body.rr-mode .app {
   border-radius: 10px;
   min-height: 44px;
   line-height: 1.3;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 .rr-thread:active { background: var(--rr-elevated); }
 .rr-thread-t {
@@ -242,9 +309,13 @@ body.rr-mode .app {
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
-  padding-bottom: max(14px, env(safe-area-inset-bottom));
+  padding-bottom: max(14px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
   border-top: 1px solid #1a1a1a;
   background: var(--rr-bg);
+  width: 100%;
+  box-sizing: border-box;
 }
 .rr-chats-pill {
   display: inline-flex;
@@ -258,6 +329,8 @@ body.rr-mode .app {
   color: var(--rr-fg);
   border: none;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 .rr-chats-pill .rr-down { font-size: 10px; color: var(--rr-muted); }
 .rr-bottom-actions { display: flex; gap: 10px; align-items: center; }
@@ -265,7 +338,9 @@ body.rr-mode .app {
 .rr-foot {
   text-align: center;
   padding: 0 12px 10px;
+  padding-bottom: max(10px, env(safe-area-inset-bottom, 0px));
   font-size: 12px;
+  flex-shrink: 0;
 }
 .rr-foot a { color: var(--rr-dim); text-decoration: none; }
 
@@ -276,10 +351,14 @@ body.rr-mode .app {
   align-items: center;
   gap: 2px;
   padding: 4px 10px 10px;
-  padding-top: max(8px, env(safe-area-inset-top));
+  padding-top: max(8px, env(safe-area-inset-top, 0px));
+  padding-left: max(10px, env(safe-area-inset-left, 0px));
+  padding-right: max(10px, env(safe-area-inset-right, 0px));
   flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
-.rr-thread-titles { text-align: center; min-width: 0; padding: 0 4px; }
+.rr-thread-titles { text-align: center; min-width: 0; padding: 0 4px; overflow: hidden; }
 .rr-t1 {
   font-size: 15px;
   font-weight: 600;
@@ -297,6 +376,7 @@ body.rr-mode .app {
   color: #f87171;
   margin: 0 0 14px;
   font-weight: 500;
+  max-width: 100%;
 }
 .rr-soft-stuck::before {
   content: "";
@@ -304,6 +384,17 @@ body.rr-mode .app {
   height: 6px;
   border-radius: 50%;
   background: var(--rr-red);
+  flex-shrink: 0;
+}
+
+.rr-info-banner {
+  font-size: 13px;
+  color: var(--rr-muted);
+  line-height: 1.4;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: var(--rr-elevated);
+  border-radius: 12px;
 }
 
 .rr-quote {
@@ -313,12 +404,16 @@ body.rr-mode .app {
   color: var(--rr-muted);
   font-size: 15px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .rr-body {
   font-size: 16px;
   line-height: 1.55;
   color: var(--rr-fg);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .rr-body p { margin: 0 0 14px; }
 .rr-body strong { font-weight: 600; }
@@ -326,23 +421,30 @@ body.rr-mode .app {
   color: var(--rr-fg);
   text-decoration: underline;
   text-underline-offset: 2px;
+  word-break: break-all;
 }
 .rr-tl { font-weight: 600; margin: 16px 0 10px; font-size: 16px; }
 .rr-msg-user {
   background: var(--rr-elevated);
   border-radius: 16px;
   padding: 12px 14px;
-  max-width: 92%;
+  max-width: min(92%, 100%);
   margin: 12px 0 12px auto;
   font-size: 15px;
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
 }
 .rr-msg-asst {
   margin: 14px 0;
   font-size: 16px;
   line-height: 1.55;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
 }
 .rr-who {
   font-size: 12px;
@@ -354,8 +456,12 @@ body.rr-mode .app {
 .rr-work-wrap {
   flex-shrink: 0;
   padding: 8px 14px;
-  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(14px, env(safe-area-inset-left, 0px));
+  padding-right: max(14px, env(safe-area-inset-right, 0px));
   background: var(--rr-bg);
+  width: 100%;
+  box-sizing: border-box;
 }
 .rr-work-bar {
   display: flex;
@@ -366,6 +472,8 @@ body.rr-mode .app {
   border-radius: 28px;
   padding: 6px 10px 6px 12px;
   min-height: 52px;
+  width: 100%;
+  box-sizing: border-box;
 }
 .rr-work-bar input {
   flex: 1;
@@ -373,8 +481,9 @@ body.rr-mode .app {
   background: transparent;
   border: none;
   color: var(--rr-fg);
-  font-size: 16px;
+  font-size: 16px; /* iOS: avoid zoom on focus */
   outline: none;
+  width: 100%;
 }
 .rr-work-bar input::placeholder { color: var(--rr-muted); }
 .rr-work-bar .rr-circ {
@@ -384,8 +493,8 @@ body.rr-mode .app {
 }
 .rr-work-bar .rr-circ svg { width: 18px; height: 18px; }
 
-.rr-muted { color: var(--rr-muted); font-size: 14px; padding: 12px 0; }
-.rr-error { color: #fca5a5; font-size: 14px; padding: 12px 0; }
+.rr-muted { color: var(--rr-muted); font-size: 14px; padding: 12px 0; line-height: 1.4; }
+.rr-error { color: #fca5a5; font-size: 14px; padding: 12px 0; line-height: 1.4; overflow-wrap: anywhere; }
 
 /* New task sheet */
 .rr-backdrop {
@@ -396,14 +505,19 @@ body.rr-mode .app {
   align-items: flex-end;
   justify-content: center;
   z-index: 80;
+  padding: 0;
+  box-sizing: border-box;
 }
 .rr-sheet {
   width: 100%;
-  max-width: 520px;
+  max-width: 560px;
   background: var(--rr-elevated);
   border-radius: 20px 20px 0 0;
-  padding: 12px 16px calc(20px + env(safe-area-inset-bottom));
+  padding: 12px 16px calc(20px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--rr-border);
+  box-sizing: border-box;
+  max-height: 90dvh;
+  overflow-y: auto;
 }
 .rr-grab {
   width: 36px;
@@ -423,6 +537,7 @@ body.rr-mode .app {
   font-size: 16px;
   font-family: inherit;
   margin-bottom: 10px;
+  box-sizing: border-box;
 }
 .rr-textarea { min-height: 110px; resize: none; }
 .rr-sheet-actions { display: flex; gap: 8px; }
@@ -436,5 +551,8 @@ body.rr-mode .app {
   cursor: pointer;
   background: var(--rr-elevated2);
   color: var(--rr-fg);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  min-height: 48px;
 }
 .rr-btn--primary { background: #fff; color: #111; }

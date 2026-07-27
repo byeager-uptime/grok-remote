@@ -38,3 +38,27 @@ test('deriveSessionStatus: connected idle => waiting', () => {
 test('deriveSessionStatus: lastFailed disconnected => stuck', () => {
   assert.equal(deriveSessionStatus({ connected: false, lastFailed: true }), 'stuck');
 });
+
+test('deriveSessionStatus: cloud-only remote is never stuck', () => {
+  assert.equal(
+    deriveSessionStatus({
+      connected: false,
+      hasLocalContent: false,
+      lastSeen: new Date().toISOString(),
+      lastCompleted: false,
+    }),
+    'done',
+  );
+});
+
+test('deriveSessionStatus: ancient host activity is done', () => {
+  assert.equal(
+    deriveSessionStatus({
+      connected: false,
+      hasLocalContent: true,
+      updated: '2026-05-29',
+      lastCompleted: false,
+    }),
+    'done',
+  );
+});

@@ -52,13 +52,18 @@ function agentBySession(sessionId: string): PublicAgent | null {
 function toRow(s: HostSession): RemoteSessionRow {
   const project = projectForCwd(s.cwd);
   const agent = agentBySession(s.sessionId);
+  const live = !!agent?.connected;
+  // Host session timestamps only — never agent import time (that made every
+  // cloud remote look "stuck" after syncHostSessions).
+  const hostActivity = s.updated || s.created || null;
   const triage = deriveSessionStatus({
-    connected: !!agent?.connected,
+    connected: live,
     inFlight: agent?.inFlight,
-    agentStatus: agent?.status,
-    lastSeen: agent?.lastSeen || s.updated,
-    updated: s.updated,
-    lastCompleted: !agent?.connected && (s.numMessages || 0) > 0,
+    agentStatus: live ? agent?.status : null,
+    lastSeen: live ? (agent?.lastSeen || hostActivity) : hostActivity,
+    updated: hostActivity,
+    lastCompleted: !live && ((s.numMessages || 0) > 0 || !s.local),
+    hasLocalContent: s.local !== false && s.status !== 'remote',
   });
   return {
     sessionId: s.sessionId,
@@ -73,7 +78,7 @@ function toRow(s: HostSession): RemoteSessionRow {
     local: s.local,
     model: s.model || agent?.model || undefined,
     agentId: agent?.id || null,
-    connected: !!agent?.connected,
+    connected: live,
   };
 }
 
@@ -156,14 +161,25 @@ export async function handleRemote(
     let body: { connect?: boolean; name?: string; cwd?: string } = {};
     try { body = (await readJsonBody(req)) as typeof body; } catch { /* empty ok */ }
     try {
+      const { findSessionDir } = await import('../session-index.js');
+      const sessionDir = findSessionDir(sessionId);
+      const hasLocal = !!sessionDir;
+      // Only auto-connect when we have a local session dir to resume.
+      // Cloud-only archives open as disconnected shells with title only.
+      const wantConnect = body.connect !== false && hasLocal;
       const agent = await manager.importHostSession({
         sessionId,
         name: typeof body.name === 'string' ? body.name : undefined,
         cwd: typeof body.cwd === 'string' ? body.cwd : undefined,
-        connect: body.connect !== false, // default connect for open
+        connect: wantConnect,
         seedHistory: true,
       });
-      sendJson(res, 200, { ok: true, agent });
+      sendJson(res, 200, {
+        ok: true,
+        agent,
+        hasLocalContent: hasLocal,
+        sessionDir: sessionDir || null,
+      });
     } catch (err) {
       sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }

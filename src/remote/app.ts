@@ -288,9 +288,16 @@ export class RemoteApp {
 
   async renderThread(sessionId: string): Promise<void> {
     let title = sessionId.slice(0, 8);
+    let listStatus: RemoteSession['status'] | null = null;
+    let isLocal = true;
     for (const g of this.projects) {
       const hit = g.sessions.find((s) => s.sessionId === sessionId);
-      if (hit) { title = hit.title; break; }
+      if (hit) {
+        title = hit.title;
+        listStatus = hit.status;
+        isLocal = hit.local !== false;
+        break;
+      }
     }
 
     const header = el('div', { class: 'rr-thread-header' });
@@ -333,31 +340,51 @@ export class RemoteApp {
 
     let agentId = sessionId;
     try {
-      const open = await apiPost<{ agent: { id: string; status?: string; lastError?: string | null } }>(
+      const open = await apiPost<{
+        agent: { id: string; status?: string; lastError?: string | null; connected?: boolean };
+        hasLocalContent?: boolean;
+      }>(
         `/api/remote/sessions/${encodeURIComponent(sessionId)}/open`,
         { connect: true, name: title },
       );
       agentId = open.agent?.id || sessionId;
+      const hasLocal = open.hasLocalContent !== false && isLocal;
 
       scroll.replaceChildren();
-      const stuck =
-        open.agent?.status === 'errored' ||
-        open.agent?.status === 'disconnected' ||
-        !!open.agent?.lastError;
-      if (stuck) {
+
+      // Status banner — only "Needs you" when list says stuck or real error.
+      if (open.agent?.lastError) {
         scroll.appendChild(el('div', { class: 'rr-soft-stuck' },
-          open.agent?.lastError
-            ? `Needs you · ${open.agent.lastError.slice(0, 80)}`
-            : 'Needs you · disconnected mid-turn',
+          `Needs you · ${open.agent.lastError.slice(0, 120)}`,
+        ));
+      } else if (listStatus === 'stuck') {
+        scroll.appendChild(el('div', { class: 'rr-soft-stuck' },
+          'Needs you · resume or send a nudge below',
+        ));
+      } else if (!hasLocal) {
+        scroll.appendChild(el('div', { class: 'rr-info-banner' },
+          'Cloud archive on this account — no transcript files on this host. Start a related task below.',
         ));
       }
 
-      const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=40`, {
+      const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=60`, {
         headers: { accept: 'application/x-ndjson' },
       });
 
       let firstUser: string | null = null;
       const chunks: HTMLElement[] = [];
+      let asstBuf = '';
+      const flushAsst = (): void => {
+        if (!asstBuf.trim()) return;
+        const box = el('div', { class: 'rr-msg-asst' });
+        box.appendChild(el('div', { class: 'rr-who' }, 'GROK'));
+        const body = el('div', { class: 'rr-body' }) as HTMLElement;
+        body.innerHTML = linkify(asstBuf.slice(0, 12000));
+        box.appendChild(body);
+        chunks.push(box);
+        asstBuf = '';
+      };
+
       if (histRes.ok) {
         const text = await histRes.text();
         for (const line of text.split('\n')) {
@@ -368,21 +395,16 @@ export class RemoteApp {
           };
           try { ev = JSON.parse(line); } catch { continue; }
           if (ev.event === 'user_message' && ev.data?.text) {
+            flushAsst();
             const t = String(ev.data.text).trim();
             if (!firstUser) firstUser = t;
             chunks.push(el('div', { class: 'rr-msg-user' }, t.slice(0, 4000)));
           } else if (ev.event === 'agent_message_chunk') {
             const t = ev.data?.update?.content?.text;
-            if (t) {
-              const box = el('div', { class: 'rr-msg-asst' });
-              box.appendChild(el('div', { class: 'rr-who' }, 'GROK'));
-              const body = el('div', { class: 'rr-body' }) as HTMLElement;
-              body.innerHTML = linkify(String(t).slice(0, 8000));
-              box.appendChild(body);
-              chunks.push(box);
-            }
+            if (t) asstBuf += String(t);
           }
         }
+        flushAsst();
       }
 
       if (firstUser) {
@@ -392,12 +414,17 @@ export class RemoteApp {
       }
       if (!chunks.length) {
         scroll.appendChild(el('div', { class: 'rr-muted' },
-          'No prior turns seeded. Send a short nudge below.',
+          hasLocal
+            ? 'No prior turns on disk yet. Send a short nudge below to resume on the host.'
+            : 'No local transcript. Type a follow-up to start fresh work on this host.',
         ));
       } else {
         for (const c of chunks) scroll.appendChild(c);
       }
-      scroll.scrollTop = scroll.scrollHeight;
+      // Ensure content is visible after paint
+      requestAnimationFrame(() => {
+        scroll.scrollTop = Math.min(scroll.scrollHeight, 200);
+      });
     } catch (e) {
       scroll.replaceChildren();
       scroll.appendChild(el('div', { class: 'rr-error' }, e instanceof Error ? e.message : String(e)));
@@ -406,36 +433,51 @@ export class RemoteApp {
     const doSend = async (): Promise<void> => {
       const text = input.value.trim();
       if (!text) return;
+      input.disabled = true;
       input.value = '';
       scroll.appendChild(el('div', { class: 'rr-msg-user' }, text));
+      const thinking = el('div', { class: 'rr-muted' }, 'Working on host…');
+      scroll.appendChild(thinking);
       scroll.scrollTop = scroll.scrollHeight;
       try {
         await apiPost(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { text });
-        await new Promise((r) => setTimeout(r, 5000));
-        const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=8`, {
-          headers: { accept: 'application/x-ndjson' },
-        });
-        if (histRes.ok) {
+        // Poll history briefly for the reply
+        let found = false;
+        for (let attempt = 0; attempt < 12 && !found; attempt++) {
+          await new Promise((r) => setTimeout(r, 1500));
+          const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=12`, {
+            headers: { accept: 'application/x-ndjson' },
+          });
+          if (!histRes.ok) continue;
           const lines = (await histRes.text()).trim().split('\n').filter(Boolean);
           for (let i = lines.length - 1; i >= 0; i--) {
             try {
               const ev = JSON.parse(lines[i]!);
               const t = ev?.data?.update?.content?.text;
-              if (ev.event === 'agent_message_chunk' && t) {
+              if (ev.event === 'agent_message_chunk' && t && String(t).length > 2) {
+                thinking.remove();
                 const box = el('div', { class: 'rr-msg-asst' });
                 box.appendChild(el('div', { class: 'rr-who' }, 'GROK'));
                 const body = el('div', { class: 'rr-body' }) as HTMLElement;
-                body.innerHTML = linkify(String(t).slice(0, 4000));
+                body.innerHTML = linkify(String(t).slice(0, 8000));
                 box.appendChild(body);
                 scroll.appendChild(box);
+                found = true;
                 break;
               }
             } catch { /* continue */ }
           }
-          scroll.scrollTop = scroll.scrollHeight;
         }
+        if (!found) {
+          thinking.textContent = 'Sent. Waiting for host reply — pull to refresh or reopen.';
+        }
+        scroll.scrollTop = scroll.scrollHeight;
       } catch (err) {
+        thinking.remove();
         scroll.appendChild(el('div', { class: 'rr-error' }, err instanceof Error ? err.message : String(err)));
+      } finally {
+        input.disabled = false;
+        input.focus();
       }
     };
 

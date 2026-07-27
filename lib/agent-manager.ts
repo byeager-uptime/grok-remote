@@ -635,6 +635,16 @@ export class AgentManager extends EventEmitter {
    * Import a host Grok session into the sidebar as a (usually disconnected)
    * agent, seeding chat history from disk when available.
    */
+  /** True when agent history has no real chat turns yet. */
+  private _historyNeedsSeed(agentId: string): boolean {
+    try {
+      const raw = fs.readFileSync(historyPath(agentId), 'utf8');
+      return !raw.includes('"user_message"');
+    } catch {
+      return true;
+    }
+  }
+
   async importHostSession(opts: {
     sessionId: string;
     name?: string;
@@ -645,14 +655,26 @@ export class AgentManager extends EventEmitter {
     const { sessionId, connect = false, seedHistory = true } = opts;
     if (!sessionId) throw new Error('sessionId required');
 
+    const { findSessionDir, seedHistoryFromSession } = await import('./session-index.js');
+    const sessionDir = findSessionDir(sessionId);
+
+    const ensureSeed = (agentId: string): number => {
+      if (!seedHistory || !sessionDir) return 0;
+      if (!this._historyNeedsSeed(agentId)) return 0;
+      return seedHistoryFromSession(sessionDir, agentId, (id, rec) => historyAppend(id, rec));
+    };
+
+    // Already imported — still re-seed empty history and reconnect if asked.
     for (const a of this.agents.values()) {
       if (a.lastSessionId === sessionId || a.id === sessionId) {
+        ensureSeed(a.id);
+        if (connect && !a.client) {
+          this._connectRecord(a);
+        }
         return this._publicRecord(a);
       }
     }
 
-    const { findSessionDir, seedHistoryFromSession } = await import('./session-index.js');
-    const sessionDir = findSessionDir(sessionId);
     let cwd = opts.cwd;
     let name = opts.name;
     if (sessionDir) {
@@ -668,24 +690,23 @@ export class AgentManager extends EventEmitter {
     }
     if (!cwd || !fs.existsSync(cwd)) cwd = os.homedir();
 
+    // Cloud-only sessions have no local dir — open as disconnected registry
+    // entries (UI can still show title + nudge). Don't spawn a doomed process
+    // unless the client explicitly wants connect (e.g. resume attempt).
+    const shouldConnect = connect && !!sessionDir;
+
     const pub = await this.spawn({
       name: name || `session-${sessionId.slice(0, 8)}`,
       cwd,
       sessionId,
-      connect,
+      connect: shouldConnect,
     });
 
-    if (seedHistory && sessionDir) {
-      const existing = historyPath(sessionId);
-      let empty = true;
-      try {
-        const raw = fs.readFileSync(existing, 'utf8');
-        // Only the agent_created line → treat as empty of turns.
-        empty = !raw.includes('"user_message"');
-      } catch { empty = true; }
-      if (empty) {
-        seedHistoryFromSession(sessionDir, pub.id, (id, rec) => historyAppend(id, rec));
-      }
+    ensureSeed(pub.id);
+
+    // Explicit connect for cloud-only (rare): try resume anyway.
+    if (connect && !shouldConnect && !this.agents.get(pub.id)?.client) {
+      try { this._connectRecord(this.agents.get(pub.id)!); } catch { /* ignore */ }
     }
 
     return this.get(pub.id) || pub;
@@ -695,10 +716,13 @@ export class AgentManager extends EventEmitter {
   async syncHostSessions(limit: number = 40): Promise<{ imported: number; total: number; agents: PublicAgent[] }> {
     const { listHostSessions } = await import('./session-index.js');
     // Main sessions only — never import subagents into the phone list.
+    // Skip pure cloud "remote" rows (no disk) so import lastSeen doesn't
+    // poison triage and we don't create empty agent shells for archives.
     const { items } = await listHostSessions({ limit, includeSubagents: false });
     let imported = 0;
     for (const s of items) {
       if (s.isSubagent) continue;
+      if (!s.local || s.status === 'remote') continue;
       const before = this.agents.size;
       await this.importHostSession({
         sessionId: s.sessionId,
