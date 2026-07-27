@@ -3,8 +3,8 @@
 // Only ship controls that do something. Live SSE for active threads.
 
 import {
-  iconBack, iconCompose, iconMic, iconSearch, iconSend, iconMore,
-  iconPlus, iconFolder, iconExternal, iconComputer, svgBtn,
+  iconBack, iconCompose, iconSearch, iconSend, iconMore,
+  iconFolder, iconExternal, iconComputer, svgBtn,
 } from './icons.js';
 
 interface RemoteSession {
@@ -140,7 +140,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/** Escape + light markdown → HTML (headings, bold, code, lists, links, paragraphs). */
+/** Escape + light markdown → HTML (headings, bold, code, lists, tables, links). */
 function formatMessage(text: string): string {
   let s = String(text || '')
     .replace(/&/g, '&amp;')
@@ -152,9 +152,11 @@ function formatMessage(text: string): string {
     `<pre class="rr-code">${code.replace(/^\n|\n$/g, '')}</pre>`);
   // inline code
   s = s.replace(/`([^`\n]+)`/g, '<code class="rr-icode">$1</code>');
-  // bold / italic
+  // bold / italic / strikethrough
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
   s = s.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+  s = s.replace(/~~([^~]+)~~/g, '<s>$1</s>');
   // headings
   s = s.replace(/^######\s+(.+)$/gm, '<div class="rr-h6">$1</div>');
   s = s.replace(/^#####\s+(.+)$/gm, '<div class="rr-h6">$1</div>');
@@ -162,23 +164,27 @@ function formatMessage(text: string): string {
   s = s.replace(/^###\s+(.+)$/gm, '<div class="rr-h5">$1</div>');
   s = s.replace(/^##\s+(.+)$/gm, '<div class="rr-h4">$1</div>');
   s = s.replace(/^#\s+(.+)$/gm, '<div class="rr-h4">$1</div>');
-  // unordered list items
+  // hr
+  s = s.replace(/^(?:---|\*\*\*|___)\s*$/gm, '<hr class="rr-hr">');
+  // unordered + ordered list items
   s = s.replace(/^[-*]\s+(.+)$/gm, '<div class="rr-li">• $1</div>');
-  // simple markdown tables (header + separator + rows)
-  s = s.replace(/(?:^|\n)((?:\|.+\|\n)+)/g, (_m, block: string) => {
+  s = s.replace(/^\d+\.\s+(.+)$/gm, '<div class="rr-li rr-li--num">$1</div>');
+  // GFM tables (header + separator + rows); tolerate missing trailing |
+  s = s.replace(/(?:^|\n)((?:\|.+\n)+)/g, (_m, block: string) => {
     const lines = block.trim().split('\n').filter(Boolean);
     if (lines.length < 2) return block;
-    if (!/^\|?\s*[-:| ]+\s*\|?$/.test(lines[1] || '')) return block;
+    if (!/^\|?[\s:|-]+\|[\s:|-]*\|?$/.test(lines[1] || '')) return block;
     const parseRow = (line: string): string[] =>
       line.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
     const head = parseRow(lines[0]!);
+    if (head.length < 1) return block;
     const body = lines.slice(2).map(parseRow);
     let html = '<div class="rr-table-wrap"><table class="rr-table"><thead><tr>';
     for (const h of head) html += `<th>${h}</th>`;
     html += '</tr></thead><tbody>';
     for (const row of body) {
       html += '<tr>';
-      for (const c of row) html += `<td>${c}</td>`;
+      for (let i = 0; i < head.length; i++) html += `<td>${row[i] ?? ''}</td>`;
       html += '</tr>';
     }
     html += '</tbody></table></div>';
@@ -186,12 +192,14 @@ function formatMessage(text: string): string {
   });
   // links
   s = s.replace(
-    /(https?:\/\/[^\s<&]+)/g,
+    /(https?:\/\/[^\s<&)]+)/g,
     '<a class="rr-link" href="$1" target="_blank" rel="noopener noreferrer">$1</a>',
   );
   // paragraphs: double newlines
   s = s.split(/\n{2,}/).map((p) => {
-    if (/^<(pre|div|ul|table)/.test(p.trim()) || p.includes('rr-table')) return p;
+    if (/^<(pre|div|ul|table|hr)/.test(p.trim()) || p.includes('rr-table') || p.includes('rr-hr')) {
+      return p;
+    }
     return `<p>${p.replace(/\n/g, '<br>')}</p>`;
   }).join('');
   return s;
@@ -201,22 +209,64 @@ function userBubble(text: string): HTMLElement {
   return el('div', { class: 'rr-msg-user' }, text.slice(0, 4000));
 }
 
-function asstBubble(text: string): HTMLElement {
+function asstBubble(text: string, opts?: { showWho?: boolean }): HTMLElement {
   const box = el('div', { class: 'rr-msg-asst' });
-  box.appendChild(el('div', { class: 'rr-who' }, 'GROK'));
+  // ChatGPT is quiet — only label the first assistant turn in a streak
+  if (opts?.showWho !== false) {
+    box.appendChild(el('div', { class: 'rr-who' }, 'Grok'));
+  }
   const body = el('div', { class: 'rr-body' }) as HTMLElement;
   body.innerHTML = formatMessage(text.slice(0, 16000));
   box.appendChild(body);
   return box;
 }
 
-/** Parse NDJSON history into ordered turn list (merge consecutive assistant chunks). */
+/** Collapse pure-repeat tokens: pongpongpong → pong */
+function collapseRepeatedToken(s: string): string {
+  const t = s.trim();
+  if (t.length < 2 || t.length > 200) return t;
+  const m = t.match(/^(.{1,40}?)\1+$/);
+  return m ? m[1]! : t;
+}
+
+/**
+ * Peel run-on fused short replies produced by reseed replaying chunks
+ * without turn boundaries, e.g. "sendbtn-oknightoksendbtn-ok" → ["sendbtn-ok","nightok","sendbtn-ok"].
+ */
+function peelFusedShortReplies(text: string, knownShort: string[]): string[] {
+  const t0 = text.trim();
+  if (!t0 || /\s/.test(t0) || t0.length < 8) return [t0];
+  const known = [...knownShort]
+    .filter((k) => k.length >= 3 && k.length <= 48 && !/\s/.test(k))
+    .sort((a, b) => b.length - a.length);
+  // Known short reply embedded mid-string → split there first
+  for (const k of known) {
+    const idx = t0.indexOf(k, 1);
+    if (idx > 0) {
+      const first = t0.slice(0, idx);
+      const rest = t0.slice(idx);
+      return [first, ...peelFusedShortReplies(rest, knownShort)].filter(Boolean);
+    }
+  }
+  for (const k of known) {
+    if (t0.startsWith(k) && t0.length > k.length) {
+      return [k, ...peelFusedShortReplies(t0.slice(k.length), knownShort)].filter(Boolean);
+    }
+  }
+  return [t0];
+}
+
+/**
+ * Parse NDJSON history into ordered turns.
+ * Strong dedupe: seed/SSE/reseed often leave short duplicate asst lines
+ * ("pong"×2) and fused short replies ("sendbtn-oknightoksendbtn-ok").
+ */
 function parseHistoryTurns(raw: string): Array<{ role: 'user' | 'asst'; text: string }> {
   const turns: Array<{ role: 'user' | 'asst'; text: string }> = [];
   let asst = '';
   const flush = (): void => {
     const t = asst.trim();
-    if (t) turns.push({ role: 'asst', text: t });
+    if (t) turns.push({ role: 'asst', text: collapseRepeatedToken(t) });
     asst = '';
   };
   for (const line of raw.split('\n')) {
@@ -234,30 +284,84 @@ function parseHistoryTurns(raw: string): Array<{ role: 'user' | 'asst'; text: st
     }
   }
   flush();
-  // Dedupe seed garbage: repeated short assistant lines, "pong"*"n", etc.
-  const normalizeAsst = (s: string): string => {
-    const t = s.trim();
-    // Collapse pure-repeat tokens: pongpongpong → pong
-    const m = t.match(/^(.{1,24}?)\1+$/);
-    if (m) return m[1]!;
-    return t;
-  };
+
+  const norm = (s: string): string => s.replace(/\s+/g, ' ').trim().toLowerCase();
   const out: typeof turns = [];
+  const seenAsstShort = new Set<string>();
+  const shortAssts: string[] = [];
+
   for (const t of turns) {
-    const cur = t.role === 'asst' ? { ...t, text: normalizeAsst(t.text) } : t;
-    const prev = out[out.length - 1];
-    if (prev && prev.role === cur.role && prev.text === cur.text) continue;
-    if (prev && prev.role === 'asst' && cur.role === 'asst') {
-      const a = prev.text;
-      const b = cur.text;
-      if (a === b) continue;
-      if (b.startsWith(a) || a.startsWith(b)) {
-        // Keep the longer non-repeating form
-        if (b.length >= a.length) out[out.length - 1] = cur;
-        continue;
+    let cur = t.role === 'asst'
+      ? { ...t, text: collapseRepeatedToken(t.text) }
+      : { ...t, text: t.text.trim() };
+    if (!cur.text) continue;
+
+    // Defuse run-on short replies into the first new token for this turn
+    if (cur.role === 'asst') {
+      const parts = peelFusedShortReplies(cur.text, shortAssts);
+      if (parts.length >= 2) {
+        // Prefer first part that is not an exact repeat of a prior short asst;
+        // fall back to first part.
+        const fresh = parts.find((p) => !seenAsstShort.has(norm(p))) || parts[0]!;
+        cur = { role: 'asst', text: fresh };
       }
     }
-    if (prev && prev.role === 'user' && cur.role === 'user' && prev.text === cur.text) continue;
+
+    const prev = out[out.length - 1];
+
+    // Drop exact consecutive duplicates (user or asst)
+    if (prev && prev.role === cur.role && norm(prev.text) === norm(cur.text)) continue;
+
+    if (cur.role === 'asst') {
+      // Prefix / containment: keep longer form only
+      if (prev && prev.role === 'asst') {
+        const a = prev.text;
+        const b = cur.text;
+        if (b.startsWith(a) || a.startsWith(b)) {
+          if (b.length >= a.length) out[out.length - 1] = cur;
+          continue;
+        }
+        // Fused short replies: pure concat of prior assts
+        if (b.length < 120) {
+          let isFused = false;
+          for (let i = 0; i < shortAssts.length && !isFused; i++) {
+            for (let j = 0; j < shortAssts.length; j++) {
+              const x = shortAssts[i]!;
+              const y = shortAssts[j]!;
+              if (b === x + y || b === y + x || b === x + y + x || b === y + x + y) {
+                isFused = true;
+                break;
+              }
+            }
+          }
+          if (isFused) continue;
+          // starts with prior short asst + more garbage
+          for (const x of shortAssts) {
+            if (x.length >= 3 && b.startsWith(x) && b.length > x.length && b.length < x.length + 48) {
+              const rest = b.slice(x.length);
+              if (shortAssts.some((y) => rest === y || rest.startsWith(y))) {
+                isFused = true;
+                break;
+              }
+            }
+          }
+          if (isFused) continue;
+        }
+      }
+
+      // Short identical assistant replies anywhere (seed garbage)
+      if (cur.text.length <= 64) {
+        const key = norm(cur.text);
+        if (seenAsstShort.has(key)) continue;
+        seenAsstShort.add(key);
+        shortAssts.push(cur.text);
+      }
+    }
+
+    if (prev && prev.role === 'user' && cur.role === 'user' && norm(prev.text) === norm(cur.text)) {
+      continue;
+    }
+
     out.push(cur);
   }
   return out;
@@ -290,6 +394,17 @@ export class RemoteApp {
   private _visBound = false;
   private _lastHistFingerprint = '';
   private _threadScroll: HTMLElement | null = null;
+  /** Last assistant text painted from history — used to ignore SSE replay. */
+  private _seedAsstTail = '';
+  /** Suppress stream chunks that only re-deliver seeded history. */
+  private _streamPriming = false;
+  /**
+   * Only paint SSE agent_message_chunk when true.
+   * False after open/refresh (history already painted); true after user send
+   * or when opening an already-running agent. Prevents fused replay bubbles
+   * like nightok+sendbtn-ok → "nightoksendbtn-ok".
+   */
+  private _acceptStream = false;
 
   constructor() {
     this.root = el('div', { class: 'rr-app' });
@@ -530,16 +645,12 @@ export class RemoteApp {
     }
   }
 
-  private renderSessionRow(s: RemoteSession, scroll: HTMLElement): void {
+  private renderSessionRow(s: RemoteSession, scroll: HTMLElement, opts?: { inWorkingOn?: boolean }): void {
     const row = el('div', { class: `rr-thread-row${s.pinned ? ' rr-thread-row--pinned' : ''}` });
     const thr = el('button', { class: 'rr-thread', type: 'button' }) as HTMLButtonElement;
     thr.onclick = () => navigate(`#/remote/s/${encodeURIComponent(s.sessionId)}`);
-    // Left: status dot (or star when pinned)
-    if (s.pinned) {
-      thr.appendChild(el('span', { class: 'rr-pin-mark', 'aria-hidden': 'true' }, '★'));
-    } else {
-      thr.appendChild(el('span', { class: `rr-st rr-st--${s.status}` }));
-    }
+    // Always status dot on the left — pin lives only on the right (no double ★)
+    thr.appendChild(el('span', { class: `rr-st rr-st--${s.status}` }));
     thr.appendChild(el('span', { class: 'rr-thread-t' }, s.title));
     const ago = formatAgo(s.updatedAtMs);
     if (ago) thr.appendChild(el('span', { class: 'rr-ago' }, ago));
@@ -558,6 +669,7 @@ export class RemoteApp {
       void this.togglePin(s.sessionId, !s.pinned);
     };
     row.appendChild(pinBtn);
+    if (opts?.inWorkingOn) row.setAttribute('data-working-on', '1');
     scroll.appendChild(row);
   }
 
@@ -581,6 +693,9 @@ export class RemoteApp {
     this._turnGotAsst = false;
     this._threadScroll = null;
     this._lastHistFingerprint = '';
+    this._seedAsstTail = '';
+    this._streamPriming = false;
+    this._acceptStream = false;
   }
 
   async bootstrap(): Promise<void> {
@@ -746,13 +861,19 @@ export class RemoteApp {
       );
     };
 
-    // Split local vs cloud archive for phone triage
+    // Split local vs cloud archive for phone triage.
+    // Pinned sessions live only in "Working on" — do not also list them under projects.
     type G = ProjectGroup;
+    const pinnedIds = new Set(this.pinned.map((p) => p.sessionId));
     const localGroups: G[] = [];
     const cloudGroups: G[] = [];
     for (const g of this.projects) {
-      const localS = g.sessions.filter((s) => s.local !== false && filterSession(s));
-      const cloudS = g.sessions.filter((s) => s.local === false && filterSession(s));
+      const localS = g.sessions.filter(
+        (s) => s.local !== false && filterSession(s) && !pinnedIds.has(s.sessionId),
+      );
+      const cloudS = g.sessions.filter(
+        (s) => s.local === false && filterSession(s) && !pinnedIds.has(s.sessionId),
+      );
       if (localS.length) localGroups.push({ ...g, sessions: localS });
       if (cloudS.length) cloudGroups.push({ ...g, sessions: cloudS });
     }
@@ -792,10 +913,10 @@ export class RemoteApp {
       }
     };
 
-    // Working on / pinned — always first when present
+    // Hierarchy: Working on → On this host → cloud archive (footer of list)
     if (pinnedFiltered.length && !this.loading) {
       scroll.appendChild(el('div', { class: 'rr-section-label rr-section-label--pin' }, 'Working on'));
-      for (const s of pinnedFiltered) this.renderSessionRow(s, scroll);
+      for (const s of pinnedFiltered) this.renderSessionRow(s, scroll, { inWorkingOn: true });
     }
 
     if (this.loading && !this.projects.length) {
@@ -805,13 +926,19 @@ export class RemoteApp {
       const retry = el('button', { class: 'rr-btn', type: 'button' }, 'Retry') as HTMLButtonElement;
       retry.onclick = () => void this.bootstrap();
       scroll.appendChild(retry);
-    } else if (!localGroups.length && !cloudGroups.length) {
+    } else if (!localGroups.length && !cloudGroups.length && !pinnedFiltered.length) {
       scroll.appendChild(el('div', { class: 'rr-muted' },
         q ? 'No sessions match your search.' : 'No main sessions yet. Start work on the host or use New.',
       ));
     } else {
-      // Cloud toggle sits ABOVE local projects so it is never trapped under the
-      // sticky bottom bar (dogfood: clicks on bottom toggle were intercepted).
+      if (localGroups.length) {
+        if (pinnedFiltered.length || cloudGroups.length) {
+          scroll.appendChild(el('div', { class: 'rr-section-label' }, 'On this host'));
+        }
+        renderGroups(localGroups, 'local');
+      }
+      // Cloud at end of scroll content (not between Working on and host).
+      // Extra bottom padding on .rr-scroll keeps toggle above sticky dock.
       if (cloudGroups.length) {
         const n = cloudGroups.reduce((a, g) => a + g.sessions.length, 0);
         const toggle = el('button', {
@@ -827,10 +954,6 @@ export class RemoteApp {
         scroll.appendChild(toggle);
         if (this.showCloudArchives) renderGroups(cloudGroups, 'cloud');
       }
-      if (localGroups.length && cloudGroups.length) {
-        scroll.appendChild(el('div', { class: 'rr-section-label' }, 'On this host'));
-      }
-      renderGroups(localGroups, 'local');
     }
 
     const bottom = el('div', { class: 'rr-bottom' });
@@ -839,11 +962,9 @@ export class RemoteApp {
     hostPill.title = 'Refresh session list';
     hostPill.onclick = () => void this.loadSessions().then(() => this.render());
     const actions = el('div', { class: 'rr-bottom-actions' });
-    const mic = svgBtn(iconMic(), 'rr-circ', 'Voice (coming soon)');
-    mic.disabled = true;
+    // No dead mic — only real controls (New task)
     const neu = svgBtn(iconCompose(), 'rr-circ rr-circ--white', 'New task');
     neu.onclick = () => navigate('#/remote/new');
-    actions.appendChild(mic);
     actions.appendChild(neu);
     bottom.appendChild(hostPill);
     bottom.appendChild(actions);
@@ -882,11 +1003,11 @@ export class RemoteApp {
     if (opts?.infoBanner) {
       scroll.appendChild(el('div', { class: 'rr-info-banner' }, opts.infoBanner));
     }
-    // Skip quote when it only duplicates the first user bubble (short chats)
+    // Quote only for long first user messages that are not already fully in the bubble
     if (!opts?.skipQuote) {
       const firstUser = turns.find((t) => t.role === 'user');
       const asstCount = turns.filter((t) => t.role === 'asst').length;
-      if (firstUser && asstCount >= 1 && firstUser.text.length > 120) {
+      if (firstUser && asstCount >= 1 && firstUser.text.length > 200) {
         const q = firstUser.text;
         scroll.appendChild(el('div', { class: 'rr-quote' },
           `"${q.slice(0, 280)}${q.length > 280 ? '…' : ''}"`,
@@ -898,10 +1019,21 @@ export class RemoteApp {
         'No messages yet. Type a nudge below.',
       ));
     } else {
+      let lastRole: 'user' | 'asst' | null = null;
       for (const t of turns) {
-        scroll.appendChild(t.role === 'user' ? userBubble(t.text) : asstBubble(t.text));
+        if (t.role === 'user') {
+          scroll.appendChild(userBubble(t.text));
+        } else {
+          // Quiet ChatGPT-style: "Grok" only on first asst after a user
+          scroll.appendChild(asstBubble(t.text, { showWho: lastRole !== 'asst' }));
+        }
+        lastRole = t.role;
       }
     }
+    const lastAsst = [...turns].reverse().find((t) => t.role === 'asst');
+    this._seedAsstTail = lastAsst?.text || '';
+    this._liveAsstEl = null;
+    this._liveAsstText = '';
     for (const p of bottomPtrs) scroll.appendChild(p);
   }
 
@@ -912,10 +1044,29 @@ export class RemoteApp {
   }
 
   private appendLiveAsst(scroll: HTMLElement, chunk: string): void {
+    // Hard gate: do not paint stream until a new user turn (or running open).
+    // SSE reconnect often replays every historical agent_message_chunk and
+    // would otherwise fuse them into a garbage bubble after seeded history.
+    if (!this._acceptStream && !this._sending) return;
+
+    // Extra safety while priming after connect
+    if (this._streamPriming && !this._sending && !this._turnGotAsst && this._seedAsstTail) {
+      const next = (this._liveAsstText + chunk).trim();
+      const seed = this._seedAsstTail.trim();
+      if (
+        !next ||
+        seed === next ||
+        seed.endsWith(next) ||
+        seed.endsWith(chunk.trim()) ||
+        (next.length <= 64 && seed.includes(next))
+      ) {
+        return;
+      }
+    }
     this._liveAsstText += chunk;
     this._turnGotAsst = true;
     if (!this._liveAsstEl) {
-      this._liveAsstEl = asstBubble(this._liveAsstText);
+      this._liveAsstEl = asstBubble(this._liveAsstText, { showWho: true });
       this.insertBeforeBottomPtr(scroll, this._liveAsstEl);
     } else {
       const body = this._liveAsstEl.querySelector('.rr-body') as HTMLElement | null;
@@ -936,8 +1087,13 @@ export class RemoteApp {
   }
 
   private connectStream(agentId: string, scroll: HTMLElement): void {
+    // Preserve seed tail across reconnect (closeStream clears agent id only)
+    const seedTail = this._seedAsstTail;
     this.closeStream();
+    this._seedAsstTail = seedTail;
     this._threadAgentId = agentId;
+    this._streamPriming = true;
+    window.setTimeout(() => { this._streamPriming = false; }, 1200);
     const es = new EventSource(`/api/agents/${encodeURIComponent(agentId)}/stream`);
     this._es = es;
 
@@ -1098,12 +1254,11 @@ export class RemoteApp {
       input.style.height = `${Math.min(Math.max(input.scrollHeight, 24), 96)}px`;
     });
 
-    const plus = svgBtn(iconPlus(), 'rr-circ', 'Attach');
-    plus.disabled = true;
+    // No dead attach (+) until implemented — only send (honest chrome)
     const sendBtn = svgBtn(iconSend(), 'rr-circ rr-circ--send', 'Send');
-    // ChatGPT-like: one pill, input grows, + left / send right on same row when short
+    // ChatGPT-like single pill: input | send
     const work = el('div', { class: 'rr-work-wrap' },
-      el('div', { class: 'rr-work-bar rr-work-bar--row' }, plus, input, sendBtn),
+      el('div', { class: 'rr-work-bar rr-work-bar--row' }, input, sendBtn),
     );
 
     const jump = el('button', {
@@ -1146,6 +1301,7 @@ export class RemoteApp {
         }
         requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
         this.connectStream(agentId, scroll);
+        this._acceptStream = false; // history is source of truth until next send
         this.startThreadSync(agentId, scroll);
         this.toast('Conversation refreshed');
       } catch (e) {
@@ -1235,7 +1391,11 @@ export class RemoteApp {
       this.connectStream(agentId, scroll);
       this.startThreadSync(agentId, scroll);
       if (open.agent?.status === 'running' || open.agent?.status === 'starting') {
+        this._acceptStream = true; // mid-flight open: show live tokens
+        this._streamPriming = false;
         this.setStatus(scroll, 'Working on host…');
+      } else {
+        this._acceptStream = false; // history already painted; wait for user send
       }
       // Don't auto-focus on open (pops keyboard + wastes space). Focus on tap.
     } catch (e) {
@@ -1255,13 +1415,18 @@ export class RemoteApp {
       this._liveAsstEl = null;
       this._liveAsstText = '';
       this._turnGotAsst = false;
-      scroll.appendChild(userBubble(text));
+      this._acceptStream = true; // allow SSE tokens for this turn
+      this._streamPriming = false;
+      // Must insert before bottom pull-to-refresh node (same as live asst)
+      this.insertBeforeBottomPtr(scroll, userBubble(text));
       this.setStatus(scroll, 'Working on host…');
       scroll.scrollTop = scroll.scrollHeight;
       try {
         // Ensure SSE is live before prompt so tokens stream into UI
         if (!this._es || this._es.readyState === EventSource.CLOSED) {
           this.connectStream(agentId, scroll);
+          this._acceptStream = true;
+          this._streamPriming = false;
         }
         await apiPost(`/api/agents/${encodeURIComponent(agentId)}/prompt`, { text });
         // Stream handles the reply; poll only if SSE never delivered.

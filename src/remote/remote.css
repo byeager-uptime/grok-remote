@@ -438,14 +438,6 @@ body.rr-kb #rr-thread-body.rr-scroll {
   text-align: right;
   padding-left: 6px;
 }
-.rr-pin-mark {
-  flex-shrink: 0;
-  width: 14px;
-  text-align: center;
-  color: #f5c542;
-  font-size: 12px;
-  line-height: 1;
-}
 .rr-pin-btn {
   flex-shrink: 0;
   width: 40px;
@@ -464,8 +456,12 @@ body.rr-kb #rr-thread-body.rr-scroll {
 .rr-pin-btn--on { color: #f5c542; }
 .rr-pin-btn:active { background: var(--rr-elevated); }
 .rr-section-label--pin {
-  color: #f5c542;
+  color: #c4a035;
   margin-top: 4px;
+  letter-spacing: 0.05em;
+}
+.rr-thread-row--pinned .rr-thread-t {
+  font-weight: 500;
 }
 
 /* Tiny status dots only (ChatGPT has no loud chips) */
@@ -578,24 +574,71 @@ body.rr-kb #rr-thread-body.rr-scroll {
 
 .rr-table-wrap {
   overflow-x: auto;
-  margin: 10px 0;
+  margin: 12px 0;
   -webkit-overflow-scrolling: touch;
+  border: 1px solid #2a2a2a;
+  border-radius: 12px;
+  background: #111;
+  max-width: 100%;
 }
 .rr-table {
   border-collapse: collapse;
   width: 100%;
+  min-width: 100%;
   font-size: 13px;
+  line-height: 1.4;
 }
 .rr-table th, .rr-table td {
-  border: 1px solid #333;
-  padding: 6px 8px;
+  border-bottom: 1px solid #2a2a2a;
+  border-right: 1px solid #222;
+  padding: 8px 10px;
   text-align: left;
   vertical-align: top;
+  white-space: normal;
+  word-break: break-word;
 }
+.rr-table th:last-child, .rr-table td:last-child { border-right: none; }
+.rr-table tr:last-child td { border-bottom: none; }
 .rr-table th {
-  background: var(--rr-elevated);
+  background: #1a1a1a;
   font-weight: 600;
+  color: #d4d4d4;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0.01em;
 }
+.rr-table td { color: var(--rr-fg); }
+.rr-hr {
+  border: none;
+  border-top: 1px solid #2a2a2a;
+  margin: 14px 0;
+}
+.rr-li { margin: 2px 0 2px 2px; padding-left: 2px; }
+.rr-li--num { padding-left: 0.5em; }
+.rr-code {
+  display: block;
+  overflow-x: auto;
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  font-size: 13px;
+  line-height: 1.45;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  -webkit-overflow-scrolling: touch;
+}
+.rr-icode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: #1f1f1f;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.rr-h4 { font-size: 17px; font-weight: 600; margin: 16px 0 8px; }
+.rr-h5 { font-size: 15px; font-weight: 600; margin: 14px 0 6px; }
+.rr-h6 { font-size: 14px; font-weight: 600; margin: 12px 0 6px; color: #cfcfcf; }
 
 .rr-proj-chev {
   color: #a3a3a3; /* contrast fix */
@@ -734,19 +777,21 @@ body.rr-kb #rr-thread-body.rr-scroll {
   box-sizing: border-box;
 }
 .rr-msg-asst {
-  margin: 14px 0;
+  margin: 10px 0 16px;
   font-size: 16px;
   line-height: 1.55;
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
   max-width: 100%;
 }
 .rr-who {
-  font-size: 12px;
-  color: var(--rr-dim);
-  font-weight: 600;
-  margin-bottom: 6px;
+  font-size: 11px;
+  color: #6b6b6b;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  margin-bottom: 4px;
 }
 
 /* Composer — ChatGPT Remote: single pill, flush to bottom/keyboard */
@@ -774,12 +819,12 @@ body.rr-kb #rr-thread-body.rr-scroll {
   width: 100%;
   box-sizing: border-box;
 }
-/* Preferred ChatGPT-like single row: + | text | send */
+/* Preferred ChatGPT-like single row: text | send */
 .rr-work-bar--row {
   flex-direction: row;
   align-items: flex-end;
-  gap: 4px;
-  padding: 6px 8px 6px 6px;
+  gap: 6px;
+  padding: 6px 6px 6px 14px;
   min-height: 48px;
 }
 .rr-work-bar input,
