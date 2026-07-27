@@ -214,7 +214,9 @@ body.rr-mode .rr-host {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 16px 16px;
+  /* Extra bottom space so last thread rows clear sticky bottom bar (dogfood:
+     Cloudflare row was covered and unclickable). */
+  padding: 4px 16px 140px;
   padding-left: max(16px, env(safe-area-inset-left, 0px));
   padding-right: max(16px, env(safe-area-inset-right, 0px));
   -webkit-overflow-scrolling: touch;
@@ -393,7 +395,81 @@ body.rr-mode .rr-host {
   font-size: 12px;
   flex-shrink: 0;
 }
-.rr-foot a { color: var(--rr-dim); text-decoration: none; }
+.rr-foot a,
+.rr-adv-link {
+  color: #a3a3a3; /* ≥4.5:1 on #000 */
+  text-decoration: none;
+}
+.rr-adv-link:hover { color: #ececec; text-decoration: underline; }
+
+.rr-search-wrap { margin: 0 0 12px; }
+.rr-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--rr-elevated);
+  border: 1px solid var(--rr-border);
+  border-radius: 12px;
+  color: var(--rr-fg);
+  padding: 12px 14px;
+  font-size: 16px;
+  outline: none;
+}
+.rr-search-input::placeholder { color: var(--rr-muted); }
+
+.rr-archive-toggle {
+  display: block;
+  width: 100%;
+  margin: 4px 0 12px;
+  padding: 12px;
+  background: transparent;
+  border: 1px dashed #333;
+  border-radius: 12px;
+  color: #a3a3a3;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+}
+.rr-archive-toggle:active { background: var(--rr-elevated); }
+.rr-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a3a3a3;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 8px 0 6px;
+  padding: 0 2px;
+}
+
+.rr-circ--send {
+  background: #fff !important;
+  color: #111 !important;
+}
+.rr-circ--send svg { stroke: #111 !important; }
+
+.rr-table-wrap {
+  overflow-x: auto;
+  margin: 10px 0;
+  -webkit-overflow-scrolling: touch;
+}
+.rr-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.rr-table th, .rr-table td {
+  border: 1px solid #333;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.rr-table th {
+  background: var(--rr-elevated);
+  font-weight: 600;
+}
+
+.rr-proj-chev {
+  color: #a3a3a3; /* contrast fix */
+}
 
 /* —— Thread view —— */
 .rr-thread-header {

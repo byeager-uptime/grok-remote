@@ -4,7 +4,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import os from 'node:os';
 
 import { send, readJsonBody } from './helpers.js';
-import { listHostSessions, type HostSession } from '../session-index.js';
+import {
+  listHostSessions,
+  findSessionDir,
+  firstUserTitle,
+  type HostSession,
+} from '../session-index.js';
 import { projectForCwd, groupSessionsByProject } from '../project-grouper.js';
 import { deriveSessionStatus, type SessionTriageStatus } from '../session-status.js';
 import type { AgentManager, PublicAgent } from '../agent-manager.js';
@@ -49,6 +54,28 @@ function agentBySession(sessionId: string): PublicAgent | null {
   return null;
 }
 
+const titleCache = new Map<string, string>();
+
+function resolveTitle(s: HostSession, agent: PublicAgent | null): string {
+  const sum = (s.summary || '').trim();
+  if (sum && sum !== '(no summary)' && sum !== '/status') return sum;
+  if (sum === '/status') return 'Status check';
+  if (agent?.name && !/^session-/i.test(agent.name) && !/^[0-9a-f]{8}$/i.test(agent.name)) {
+    return agent.name;
+  }
+  const cached = titleCache.get(s.sessionId);
+  if (cached) return cached;
+  const dir = findSessionDir(s.sessionId);
+  if (dir) {
+    const first = firstUserTitle(dir);
+    if (first) {
+      titleCache.set(s.sessionId, first);
+      return first;
+    }
+  }
+  return `Session ${s.sessionId.slice(0, 8)}`;
+}
+
 function toRow(s: HostSession): RemoteSessionRow {
   const project = projectForCwd(s.cwd);
   const agent = agentBySession(s.sessionId);
@@ -65,9 +92,10 @@ function toRow(s: HostSession): RemoteSessionRow {
     lastCompleted: !live && ((s.numMessages || 0) > 0 || !s.local),
     hasLocalContent: s.local !== false && s.status !== 'remote',
   });
+
   return {
     sessionId: s.sessionId,
-    title: s.summary && s.summary !== '(no summary)' ? s.summary : `Session ${s.sessionId.slice(0, 8)}`,
+    title: resolveTitle(s, agent),
     cwd: s.cwd || project.cwd,
     projectId: project.id,
     projectLabel: project.label,
@@ -120,19 +148,29 @@ export async function handleRemote(
         includeSubagents: false,
       });
       // listHostSessions already main-only after our filter
+      const statusRank: Record<string, number> = { stuck: 0, running: 1, waiting: 2, done: 3 };
       const rows = items.filter((s) => !s.isSubagent).map(toRow);
+      // Within each project, triage status then recency
       const groups = groupSessionsByProject(rows).map((g) => ({
         projectId: g.project.id,
         projectLabel: g.project.label,
         cwd: g.project.cwd,
         isGit: g.project.isGit,
-        sessions: g.sessions,
+        sessions: [...g.sessions].sort((a, b) => {
+          const ra = statusRank[a.status] ?? 9;
+          const rb = statusRank[b.status] ?? 9;
+          if (ra !== rb) return ra - rb;
+          return String(b.updated || '').localeCompare(String(a.updated || ''));
+        }),
       }));
-      // Sort groups: any stuck first, then by label
+      // Sort groups: any stuck first, then by whether local, then label
       groups.sort((a, b) => {
         const aStuck = a.sessions.some((s) => s.status === 'stuck') ? 0 : 1;
         const bStuck = b.sessions.some((s) => s.status === 'stuck') ? 0 : 1;
         if (aStuck !== bStuck) return aStuck - bStuck;
+        const aLocal = a.sessions.some((s) => s.local) ? 0 : 1;
+        const bLocal = b.sessions.some((s) => s.local) ? 0 : 1;
+        if (aLocal !== bLocal) return aLocal - bLocal;
         return a.projectLabel.localeCompare(b.projectLabel);
       });
       const stuckCount = rows.filter((r) => r.status === 'stuck').length;

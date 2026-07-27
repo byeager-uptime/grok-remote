@@ -3,7 +3,7 @@
 // Only ship controls that do something. Live SSE for active threads.
 
 import {
-  iconMenu, iconBack, iconCompose, iconMic,
+  iconMenu, iconBack, iconCompose, iconMic, iconSearch, iconSend,
   iconPlus, iconFolder, iconExternal, iconComputer, svgBtn,
 } from './icons.js';
 
@@ -140,6 +140,26 @@ function formatMessage(text: string): string {
   s = s.replace(/^#\s+(.+)$/gm, '<div class="rr-h4">$1</div>');
   // unordered list items
   s = s.replace(/^[-*]\s+(.+)$/gm, '<div class="rr-li">• $1</div>');
+  // simple markdown tables (header + separator + rows)
+  s = s.replace(/(?:^|\n)((?:\|.+\|\n)+)/g, (_m, block: string) => {
+    const lines = block.trim().split('\n').filter(Boolean);
+    if (lines.length < 2) return block;
+    if (!/^\|?\s*[-:| ]+\s*\|?$/.test(lines[1] || '')) return block;
+    const parseRow = (line: string): string[] =>
+      line.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+    const head = parseRow(lines[0]!);
+    const body = lines.slice(2).map(parseRow);
+    let html = '<div class="rr-table-wrap"><table class="rr-table"><thead><tr>';
+    for (const h of head) html += `<th>${h}</th>`;
+    html += '</tr></thead><tbody>';
+    for (const row of body) {
+      html += '<tr>';
+      for (const c of row) html += `<td>${c}</td>`;
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    return `\n${html}\n`;
+  });
   // links
   s = s.replace(
     /(https?:\/\/[^\s<&]+)/g,
@@ -147,7 +167,7 @@ function formatMessage(text: string): string {
   );
   // paragraphs: double newlines
   s = s.split(/\n{2,}/).map((p) => {
-    if (/^<(pre|div|ul)/.test(p.trim())) return p;
+    if (/^<(pre|div|ul|table)/.test(p.trim()) || p.includes('rr-table')) return p;
     return `<p>${p.replace(/\n/g, '<br>')}</p>`;
   }).join('');
   return s;
@@ -213,6 +233,10 @@ export class RemoteApp {
   loading = false;
   error: string | null = null;
   collapsed = new Set<string>();
+  /** Hide cloud archives behind a toggle by default (phone triage = local first). */
+  showCloudArchives = false;
+  searchQuery = '';
+  searchOpen = false;
   private _es: EventSource | null = null;
   private _threadAgentId: string | null = null;
   private _liveAsstEl: HTMLElement | null = null;
@@ -220,6 +244,8 @@ export class RemoteApp {
   private _statusEl: HTMLElement | null = null;
   /** True once this user turn already received assistant text (SSE or poll). */
   private _turnGotAsst = false;
+  private _listPoll: ReturnType<typeof setInterval> | null = null;
+  private _sending = false;
 
   constructor() {
     this.root = el('div', { class: 'rr-app' });
@@ -229,6 +255,36 @@ export class RemoteApp {
     parent.appendChild(this.root);
     window.addEventListener('hashchange', () => void this.render());
     void this.bootstrap();
+  }
+
+  private startListPoll(): void {
+    if (this._listPoll) return;
+    this._listPoll = setInterval(() => {
+      if (parseRoute().name !== 'home') return;
+      void this.loadSessionsQuiet().then(() => {
+        if (parseRoute().name === 'home') this.renderHome();
+      });
+    }, 20000);
+  }
+
+  /** Background refresh — no loading flash. */
+  async loadSessionsQuiet(): Promise<void> {
+    try {
+      const data = await apiGet<SessionsResponse>('/api/remote/sessions?limit=50');
+      this.projects = (data.projects || []).map((g) => ({
+        ...g,
+        projectLabel: cleanLabel(g.projectLabel),
+      }));
+      this.stuckCount = data.stuckCount || 0;
+      this.error = null;
+    } catch { /* keep last good list */ }
+  }
+
+  private stopListPoll(): void {
+    if (this._listPoll) {
+      clearInterval(this._listPoll);
+      this._listPoll = null;
+    }
   }
 
   private closeStream(): void {
@@ -276,13 +332,16 @@ export class RemoteApp {
     const route = parseRoute();
     this.root.replaceChildren();
     if (route.name === 'thread') {
+      this.stopListPoll();
       await this.renderThread(route.sessionId);
       return;
     }
     if (route.name === 'new') {
+      this.stopListPoll();
       this.renderNewTask();
       return;
     }
+    this.startListPoll();
     this.renderHome();
   }
 
@@ -293,8 +352,9 @@ export class RemoteApp {
   }
 
   renderHome(): void {
+    // Safe to re-call from search/filter without full route render
+    this.root.replaceChildren();
     const header = el('div', { class: 'rr-header rr-header--simple' });
-    // Only controls that do work: refresh list (was dead Menu).
     const refresh = svgBtn(iconMenu(), 'rr-circ', 'Refresh sessions');
     refresh.onclick = () => {
       void this.loadSessions().then(() => this.render());
@@ -315,11 +375,48 @@ export class RemoteApp {
         ),
       ),
     );
-    // spacer to balance grid
-    header.appendChild(el('div', { class: 'rr-circ-spacer' }));
+    const searchBtn = svgBtn(iconSearch(), 'rr-circ', 'Search sessions');
+    searchBtn.onclick = () => {
+      this.searchOpen = !this.searchOpen;
+      if (!this.searchOpen) this.searchQuery = '';
+      this.renderHome();
+    };
+    header.appendChild(searchBtn);
 
     const scroll = el('div', { class: 'rr-scroll' });
     scroll.appendChild(el('h1', { class: 'rr-h1' }, 'Projects'));
+
+    if (this.searchOpen) {
+      const wrap = el('div', { class: 'rr-search-wrap' });
+      const inp = document.createElement('input');
+      inp.type = 'search';
+      inp.className = 'rr-search-input';
+      inp.placeholder = 'Filter sessions';
+      inp.value = this.searchQuery;
+      inp.autocomplete = 'off';
+      inp.setAttribute('aria-label', 'Filter sessions');
+      // Debounced re-render so agent-browser / typing don't thrash mid-keystroke
+      let t: ReturnType<typeof setTimeout> | null = null;
+      inp.oninput = () => {
+        this.searchQuery = inp.value;
+        if (t) clearTimeout(t);
+        t = setTimeout(() => {
+          const q = this.searchQuery;
+          this.renderHome();
+          const again = this.root.querySelector('.rr-search-input') as HTMLInputElement | null;
+          if (again) {
+            again.value = q;
+            this.searchQuery = q;
+            again.focus();
+            const len = again.value.length;
+            again.setSelectionRange(len, len);
+          }
+        }, 180);
+      };
+      wrap.appendChild(inp);
+      scroll.appendChild(wrap);
+      requestAnimationFrame(() => inp.focus());
+    }
 
     if (this.stuckCount > 0) {
       scroll.appendChild(el('div', { class: 'rr-banner' },
@@ -327,29 +424,41 @@ export class RemoteApp {
       ));
     }
 
-    if (this.loading) {
-      scroll.appendChild(el('div', { class: 'rr-muted' }, 'Loading…'));
-    } else if (this.error) {
-      scroll.appendChild(el('div', { class: 'rr-error' }, this.error));
-      const retry = el('button', { class: 'rr-btn', type: 'button' }, 'Retry') as HTMLButtonElement;
-      retry.onclick = () => void this.bootstrap();
-      scroll.appendChild(retry);
-    } else if (!this.projects.length) {
-      scroll.appendChild(el('div', { class: 'rr-muted' },
-        'No main sessions yet. Start work on the host or use New.',
-      ));
-    } else {
-      for (const g of this.projects) {
-        const collapsed = this.collapsed.has(g.projectId);
+    const q = this.searchQuery.trim().toLowerCase();
+    const filterSession = (s: RemoteSession): boolean => {
+      if (!q) return true;
+      return (
+        s.title.toLowerCase().includes(q) ||
+        s.sessionId.toLowerCase().includes(q) ||
+        (s.cwd || '').toLowerCase().includes(q)
+      );
+    };
+
+    // Split local vs cloud archive for phone triage
+    type G = ProjectGroup;
+    const localGroups: G[] = [];
+    const cloudGroups: G[] = [];
+    for (const g of this.projects) {
+      const localS = g.sessions.filter((s) => s.local !== false && filterSession(s));
+      const cloudS = g.sessions.filter((s) => s.local === false && filterSession(s));
+      if (localS.length) localGroups.push({ ...g, sessions: localS });
+      if (cloudS.length) cloudGroups.push({ ...g, sessions: cloudS });
+    }
+
+    const renderGroups = (groups: G[], prefix: string): void => {
+      for (const g of groups) {
+        const collapseKey = `${prefix}:${g.projectId}`;
+        const collapsed = this.collapsed.has(collapseKey);
         const row = el('div', { class: 'rr-proj-row' });
         const head = el('button', { class: 'rr-proj-head', type: 'button' }) as HTMLButtonElement;
         head.innerHTML = iconFolder();
         head.appendChild(el('span', { class: 'rr-proj-name' }, cleanLabel(g.projectLabel)));
-        head.appendChild(el('span', { class: 'rr-proj-chev' }, collapsed ? '▸' : '▾'));
+        const chev = el('span', { class: 'rr-proj-chev', 'aria-hidden': 'true' }, collapsed ? '▸' : '▾');
+        head.appendChild(chev);
         head.onclick = () => {
-          if (this.collapsed.has(g.projectId)) this.collapsed.delete(g.projectId);
-          else this.collapsed.add(g.projectId);
-          void this.render();
+          if (this.collapsed.has(collapseKey)) this.collapsed.delete(collapseKey);
+          else this.collapsed.add(collapseKey);
+          this.renderHome();
         };
         const ext = document.createElement('button');
         ext.type = 'button';
@@ -373,12 +482,48 @@ export class RemoteApp {
           scroll.appendChild(thr);
         }
       }
+    };
+
+    if (this.loading && !this.projects.length) {
+      scroll.appendChild(el('div', { class: 'rr-muted' }, 'Loading…'));
+    } else if (this.error && !this.projects.length) {
+      scroll.appendChild(el('div', { class: 'rr-error' }, this.error));
+      const retry = el('button', { class: 'rr-btn', type: 'button' }, 'Retry') as HTMLButtonElement;
+      retry.onclick = () => void this.bootstrap();
+      scroll.appendChild(retry);
+    } else if (!localGroups.length && !cloudGroups.length) {
+      scroll.appendChild(el('div', { class: 'rr-muted' },
+        q ? 'No sessions match your search.' : 'No main sessions yet. Start work on the host or use New.',
+      ));
+    } else {
+      // Cloud toggle sits ABOVE local projects so it is never trapped under the
+      // sticky bottom bar (dogfood: clicks on bottom toggle were intercepted).
+      if (cloudGroups.length) {
+        const n = cloudGroups.reduce((a, g) => a + g.sessions.length, 0);
+        const toggle = el('button', {
+          class: 'rr-archive-toggle',
+          type: 'button',
+        }, this.showCloudArchives
+          ? `Hide cloud archive (${n})`
+          : `Show cloud archive (${n})`) as HTMLButtonElement;
+        toggle.onclick = () => {
+          this.showCloudArchives = !this.showCloudArchives;
+          this.renderHome();
+        };
+        scroll.appendChild(toggle);
+        if (this.showCloudArchives) renderGroups(cloudGroups, 'cloud');
+      }
+      if (localGroups.length && cloudGroups.length) {
+        scroll.appendChild(el('div', { class: 'rr-section-label' }, 'On this host'));
+      }
+      renderGroups(localGroups, 'local');
     }
 
     const bottom = el('div', { class: 'rr-bottom' });
-    const chats = el('button', { class: 'rr-chats-pill', type: 'button' }) as HTMLButtonElement;
-    chats.textContent = 'Refresh';
-    chats.onclick = () => void this.loadSessions().then(() => this.render());
+    const hostPill = el('button', { class: 'rr-chats-pill', type: 'button' }) as HTMLButtonElement;
+    hostPill.textContent = this.hostLabel;
+    hostPill.title = 'Refresh session list';
+    hostPill.onclick = () => void this.loadSessions().then(() => this.render());
     const actions = el('div', { class: 'rr-bottom-actions' });
     const mic = svgBtn(iconMic(), 'rr-circ', 'Voice (coming soon)');
     mic.disabled = true;
@@ -386,11 +531,11 @@ export class RemoteApp {
     neu.onclick = () => navigate('#/remote/new');
     actions.appendChild(mic);
     actions.appendChild(neu);
-    bottom.appendChild(chats);
+    bottom.appendChild(hostPill);
     bottom.appendChild(actions);
 
     const foot = el('div', { class: 'rr-foot' });
-    const adv = el('a', { href: '#/advanced' }, 'Advanced console') as HTMLAnchorElement;
+    const adv = el('a', { href: '#/advanced', class: 'rr-adv-link' }, 'Advanced console') as HTMLAnchorElement;
     adv.addEventListener('click', (ev) => {
       ev.preventDefault();
       location.hash = '#/advanced';
@@ -574,11 +719,9 @@ export class RemoteApp {
 
     const plus = svgBtn(iconPlus(), 'rr-circ', 'Attach');
     plus.disabled = true;
-    const mic = svgBtn(iconMic(), 'rr-circ', 'Voice (coming soon)');
-    mic.disabled = true;
-
+    const sendBtn = svgBtn(iconSend(), 'rr-circ rr-circ--send', 'Send');
     const work = el('div', { class: 'rr-work-wrap' },
-      el('div', { class: 'rr-work-bar' }, plus, input, mic),
+      el('div', { class: 'rr-work-bar' }, plus, input, sendBtn),
     );
 
     this.root.appendChild(header);
@@ -639,13 +782,17 @@ export class RemoteApp {
         infoBanner,
         skipQuote: turns.length <= 1,
       });
-      scroll.scrollTop = scroll.scrollHeight;
+      // Jump to latest (ChatGPT-style open)
+      requestAnimationFrame(() => {
+        scroll.scrollTop = scroll.scrollHeight;
+      });
 
       // Live stream for replies / new tasks already running
       this.connectStream(agentId, scroll);
       if (open.agent?.status === 'running' || open.agent?.status === 'starting') {
         this.setStatus(scroll, 'Working on host…');
       }
+      input.focus();
     } catch (e) {
       scroll.replaceChildren();
       scroll.appendChild(el('div', { class: 'rr-error' }, e instanceof Error ? e.message : String(e)));
@@ -653,8 +800,10 @@ export class RemoteApp {
 
     const doSend = async (): Promise<void> => {
       const text = input.value.trim();
-      if (!text || !agentId) return;
+      if (!text || !agentId || this._sending) return;
+      this._sending = true;
       input.disabled = true;
+      sendBtn.disabled = true;
       input.value = '';
       // Reset live buffer so we only show NEW assistant text
       this._liveAsstEl = null;
@@ -697,11 +846,14 @@ export class RemoteApp {
         this.setStatus(scroll, null);
         scroll.appendChild(el('div', { class: 'rr-error' }, err instanceof Error ? err.message : String(err)));
       } finally {
+        this._sending = false;
         input.disabled = false;
+        sendBtn.disabled = false;
         input.focus();
       }
     };
 
+    sendBtn.onclick = () => void doSend();
     input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && !ev.shiftKey) {
         ev.preventDefault();
@@ -712,7 +864,7 @@ export class RemoteApp {
 
   renderNewTask(): void {
     this.renderHome();
-    const sheet = el('div', { class: 'rr-sheet' },
+    const sheet = el('div', { class: 'rr-sheet', role: 'dialog', 'aria-label': 'New task' },
       el('div', { class: 'rr-grab' }),
       el('h2', {}, 'New task'),
     );
@@ -757,6 +909,14 @@ export class RemoteApp {
       if (ev.target === backdrop) navigate('#/remote');
     };
     this.root.appendChild(backdrop);
+    const onKey = (ev: KeyboardEvent): void => {
+      if (ev.key === 'Escape') {
+        window.removeEventListener('keydown', onKey);
+        navigate('#/remote');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    requestAnimationFrame(() => ta.focus());
   }
 
   async submitNewTask(): Promise<void> {
@@ -764,7 +924,13 @@ export class RemoteApp {
     const ta = this.root.querySelector('#rr-task-text') as HTMLTextAreaElement | null;
     const text = ta?.value.trim() || '';
     const cwd = sel?.value || undefined;
-    if (!text) return;
+    if (!text) {
+      this.toast('Type a task first');
+      ta?.focus();
+      return;
+    }
+    const start = this.root.querySelector('.rr-btn--primary') as HTMLButtonElement | null;
+    if (start) start.disabled = true;
     try {
       const r = await apiPost<{ agent: { id: string; name?: string } }>('/api/remote/tasks', {
         text,
@@ -773,7 +939,8 @@ export class RemoteApp {
       });
       navigate(`#/remote/s/${encodeURIComponent(r.agent.id)}`);
     } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
+      this.toast(e instanceof Error ? e.message : String(e));
+      if (start) start.disabled = false;
     }
   }
 }

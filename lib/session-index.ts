@@ -337,6 +337,42 @@ export async function listHostSessions(opts: ListHostSessionsOpts = {}): Promise
   };
 }
 
+/**
+ * Best-effort title when generated_title / summary is missing.
+ * Pulls first real user_query from chat_history.jsonl.
+ */
+export function firstUserTitle(sessionDir: string): string | null {
+  const histPath = path.join(sessionDir, 'chat_history.jsonl');
+  if (!fs.existsSync(histPath)) return null;
+  let raw: string;
+  try { raw = fs.readFileSync(histPath, 'utf8'); } catch { return null; }
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let o: { type?: string; content?: unknown };
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o.type !== 'user') continue;
+    const content = o.content;
+    const texts: string[] = [];
+    if (typeof content === 'string') texts.push(content);
+    else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== 'object') continue;
+        const b = block as { type?: string; text?: string };
+        if (b.type === 'text' && typeof b.text === 'string') texts.push(b.text);
+      }
+    }
+    for (const t of texts) {
+      const m = t.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/i);
+      const body = (m && m[1] ? m[1] : t).trim();
+      if (!body) continue;
+      if (body.startsWith('<user_info') || body.startsWith('<system-reminder') || body.includes('<system-reminder>')) continue;
+      const one = body.replace(/\s+/g, ' ').slice(0, 90);
+      if (one.length >= 3) return one;
+    }
+  }
+  return null;
+}
+
 /** Find on-disk session directory for a session id (any cwd). */
 export function findSessionDir(sessionId: string): string | null {
   if (!UUID_RE.test(sessionId)) return null;

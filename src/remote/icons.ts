@@ -41,6 +41,14 @@ export function iconComputer(): string {
   return `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M8 21h8M12 17v4"/></svg>`;
 }
 
+export function iconSend(): string {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M13 6l6 6-6 6"/></svg>`;
+}
+
+export function iconClose(): string {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>`;
+}
+
 export function svgBtn(html: string, className = 'rr-circ', title = ''): HTMLButtonElement {
   const b = document.createElement('button');
   b.type = 'button';
