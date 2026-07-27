@@ -210,17 +210,31 @@ function parseHistoryTurns(raw: string): Array<{ role: 'user' | 'asst'; text: st
     }
   }
   flush();
-  // Dedupe consecutive identical turns (bad double-seed)
+  // Dedupe seed garbage: repeated short assistant lines, "pong"*"n", etc.
+  const normalizeAsst = (s: string): string => {
+    const t = s.trim();
+    // Collapse pure-repeat tokens: pongpongpong → pong
+    const m = t.match(/^(.{1,24}?)\1+$/);
+    if (m) return m[1]!;
+    return t;
+  };
   const out: typeof turns = [];
   for (const t of turns) {
+    const cur = t.role === 'asst' ? { ...t, text: normalizeAsst(t.text) } : t;
     const prev = out[out.length - 1];
-    if (prev && prev.role === t.role && prev.text === t.text) continue;
-    // Also skip asst that is exact prefix-duplicate of previous (concat bug)
-    if (prev && prev.role === 'asst' && t.role === 'asst' && t.text.startsWith(prev.text.slice(0, 80)) && prev.text.length > 200) {
-      out[out.length - 1] = t.length > prev.text.length ? t : prev;
-      continue;
+    if (prev && prev.role === cur.role && prev.text === cur.text) continue;
+    if (prev && prev.role === 'asst' && cur.role === 'asst') {
+      const a = prev.text;
+      const b = cur.text;
+      if (a === b) continue;
+      if (b.startsWith(a) || a.startsWith(b)) {
+        // Keep the longer non-repeating form
+        if (b.length >= a.length) out[out.length - 1] = cur;
+        continue;
+      }
     }
-    out.push(t);
+    if (prev && prev.role === 'user' && cur.role === 'user' && prev.text === cur.text) continue;
+    out.push(cur);
   }
   return out;
 }
@@ -790,10 +804,11 @@ export class RemoteApp {
     if (opts?.infoBanner) {
       scroll.appendChild(el('div', { class: 'rr-info-banner' }, opts.infoBanner));
     }
-    // Quote only when we have a prior user turn and later content (ChatGPT-ish)
+    // Skip quote when it only duplicates the first user bubble (short chats)
     if (!opts?.skipQuote) {
       const firstUser = turns.find((t) => t.role === 'user');
-      if (firstUser && turns.length > 1) {
+      const asstCount = turns.filter((t) => t.role === 'asst').length;
+      if (firstUser && asstCount >= 1 && firstUser.text.length > 120) {
         const q = firstUser.text;
         scroll.appendChild(el('div', { class: 'rr-quote' },
           `"${q.slice(0, 280)}${q.length > 280 ? '…' : ''}"`,
@@ -922,6 +937,11 @@ export class RemoteApp {
   }
 
   async renderThread(sessionId: string): Promise<void> {
+    // CRITICAL: never stack chrome. Soft-refresh and pull-up used to re-append
+    // a full shell → triple headers/composers (user dogfood screenshot).
+    this.closeStream();
+    this.root.replaceChildren();
+
     let title = sessionId.slice(0, 8);
     let listStatus: RemoteSession['status'] | null = null;
     let isLocalList = true;
@@ -935,7 +955,9 @@ export class RemoteApp {
       }
     }
 
-    // ChatGPT Remote header: back · title/host · (compose + more) pill
+    // ChatGPT Remote: single shell — absolute header + composer, scroll fills middle
+    const shell = el('div', { class: 'rr-thread-shell' });
+
     const header = el('div', { class: 'rr-thread-header rr-thread-header--simple' });
     const back = svgBtn(iconBack(), 'rr-circ', 'Back');
     back.onclick = () => navigate('#/remote');
@@ -953,13 +975,7 @@ export class RemoteApp {
       this.openOverflowMenu([
         {
           label: 'Refresh conversation',
-          action: () => {
-            void (async () => {
-              const route = parseRoute();
-              if (route.name === 'thread') await this.renderThread(route.sessionId);
-              this.toast('Conversation refreshed');
-            })();
-          },
+          action: () => { void softRefresh(); },
         },
         { label: 'New task', action: () => navigate('#/remote/new') },
         {
@@ -982,18 +998,10 @@ export class RemoteApp {
     actions.appendChild(moreBtn);
     header.appendChild(actions);
 
-    const scroll = el('div', { class: 'rr-scroll', id: 'rr-thread-body' });
-    // Pull UP at bottom of chat to refresh (natural when reading latest)
-    this.attachPullToRefresh(scroll, async () => {
-      const route = parseRoute();
-      if (route.name === 'thread') {
-        await this.renderThread(route.sessionId);
-        this.toast('Conversation refreshed');
-      }
-    }, 'up');
+    const scroll = el('div', { class: 'rr-scroll rr-thread-scroll', id: 'rr-thread-body' });
     scroll.appendChild(el('div', { class: 'rr-muted' }, 'Opening…'));
 
-    // ChatGPT-style two-tier composer: input row + tools row
+    // Single-row ChatGPT composer (tools inline, not a tall two-tier stack)
     const input = document.createElement('textarea');
     input.rows = 1;
     input.placeholder = `Work on ${this.hostLabel}`;
@@ -1003,21 +1011,17 @@ export class RemoteApp {
     input.autocapitalize = 'sentences';
     input.addEventListener('input', () => {
       input.style.height = 'auto';
-      input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+      input.style.height = `${Math.min(Math.max(input.scrollHeight, 24), 96)}px`;
     });
 
     const plus = svgBtn(iconPlus(), 'rr-circ', 'Attach');
     plus.disabled = true;
     const sendBtn = svgBtn(iconSend(), 'rr-circ rr-circ--send', 'Send');
-    const tools = el('div', { class: 'rr-composer-tools' },
-      el('div', { class: 'rr-composer-tools-left' }, plus),
-      sendBtn,
-    );
+    // ChatGPT-like: one pill, input grows, + left / send right on same row when short
     const work = el('div', { class: 'rr-work-wrap' },
-      el('div', { class: 'rr-work-bar' }, input, tools),
+      el('div', { class: 'rr-work-bar rr-work-bar--row' }, plus, input, sendBtn),
     );
 
-    // Jump-to-latest chip (ChatGPT ↓)
     const jump = el('button', {
       class: 'rr-jump-latest',
       type: 'button',
@@ -1030,12 +1034,41 @@ export class RemoteApp {
       jump.classList.toggle('rr-jump-latest--show', !nearBottom);
     }, { passive: true });
 
-    this.root.appendChild(header);
-    this.root.appendChild(scroll);
-    this.root.appendChild(jump);
-    this.root.appendChild(work);
+    shell.appendChild(header);
+    shell.appendChild(scroll);
+    shell.appendChild(jump);
+    shell.appendChild(work);
+    this.root.appendChild(shell);
 
     let agentId = sessionId;
+
+    const softRefresh = async (): Promise<void> => {
+      if (!agentId) return;
+      try {
+        const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
+          headers: { accept: 'application/x-ndjson' },
+        });
+        if (!histRes.ok) throw new Error('history failed');
+        const raw = await histRes.text();
+        this._lastHistFingerprint = `${raw.length}:${raw.slice(-200)}`;
+        const turns = parseHistoryTurns(raw);
+        this.paintTurns(scroll, turns, { skipQuote: turns.length <= 1 });
+        // Ensure bottom pull affordance remains
+        if (!scroll.querySelector('.rr-ptr--bottom')) {
+          this.attachPullToRefresh(scroll, softRefresh, 'up');
+        }
+        requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
+        // Re-bind stream after refresh
+        this.connectStream(agentId, scroll);
+        this.startThreadSync(agentId, scroll);
+        this.toast('Conversation refreshed');
+      } catch (e) {
+        this.toast(e instanceof Error ? e.message : 'Refresh failed');
+      }
+    };
+
+    // Pull UP at bottom — soft refresh only (never re-mount shell)
+    this.attachPullToRefresh(scroll, softRefresh, 'up');
     try {
       const open = await apiPost<{
         agent: {
@@ -1102,9 +1135,7 @@ export class RemoteApp {
       }
       // Don't auto-focus on open (pops keyboard + wastes space). Focus on tap.
     } catch (e) {
-      const ptr = scroll.querySelector('.rr-ptr');
-      scroll.replaceChildren();
-      if (ptr) scroll.appendChild(ptr);
+      this.paintTurns(scroll, [], {});
       scroll.appendChild(el('div', { class: 'rr-error' }, e instanceof Error ? e.message : String(e)));
     }
 

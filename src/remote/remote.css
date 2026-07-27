@@ -97,8 +97,8 @@ body.rr-mode .rr-host {
 body.rr-kb .rr-t2 { display: none !important; }
 body.rr-kb .rr-thread-header {
   padding-top: max(4px, env(safe-area-inset-top, 0px)) !important;
-  padding-bottom: 2px !important;
-  background: rgba(0,0,0,.72) !important;
+  padding-bottom: 4px !important;
+  background: rgba(0,0,0,.88) !important;
 }
 body.rr-kb .rr-header {
   padding-top: max(4px, env(safe-area-inset-top, 0px)) !important;
@@ -106,17 +106,41 @@ body.rr-kb .rr-header {
 }
 body.rr-kb .rr-t1 { font-size: 14px; }
 body.rr-kb .rr-work-wrap {
-  padding-top: 4px !important;
-  padding-bottom: 4px !important; /* NOT safe-area — keyboard already inset */
+  padding: 4px 10px 2px !important; /* NOT safe-area — keyboard already inset */
   border-top: none !important;
+  background: #000 !important;
 }
-body.rr-kb .rr-work-bar { min-height: 40px; }
-body.rr-kb .rr-composer-tools { display: none !important; } /* single-row while typing */
+body.rr-kb .rr-work-bar,
+body.rr-kb .rr-work-bar--row {
+  min-height: 44px !important;
+  padding: 4px 6px 4px 8px !important;
+}
+body.rr-kb .rr-composer-tools { display: none !important; }
 body.rr-kb .rr-circ { width: 32px; height: 32px; }
 body.rr-kb .rr-quote { display: none; }
+body.rr-kb .rr-thread-scroll { padding-bottom: 8px !important; }
 body.rr-kb .rr-scroll { padding-bottom: 4px !important; }
 body.rr-kb .rr-foot,
 body.rr-kb .rr-bottom { display: none !important; }
+body.rr-kb .rr-jump-latest { bottom: 52px !important; }
+
+/* One thread shell only — prevents stacked chrome */
+.rr-thread-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  width: 100%;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+.rr-thread-scroll {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  padding: 8px 16px 12px !important;
+}
 
 /* Tablet / desktop: comfortable reading column, still full height */
 @media (min-width: 640px) {
@@ -675,18 +699,18 @@ body.rr-kb #rr-thread-body.rr-scroll {
   margin-bottom: 6px;
 }
 
-/* Composer — ChatGPT Remote: pill docked tight, no fat dead zone above keyboard */
+/* Composer — ChatGPT Remote: single pill, flush to bottom/keyboard */
 .rr-work-wrap {
   flex-shrink: 0;
   padding: 6px 12px;
-  /* Home-indicator only when keyboard closed. Never double with keyboard. */
   padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
   padding-left: max(12px, env(safe-area-inset-left, 0px));
   padding-right: max(12px, env(safe-area-inset-right, 0px));
-  background: linear-gradient(to top, #000 70%, rgba(0,0,0,.0));
+  background: #000;
   width: 100%;
   box-sizing: border-box;
   border-top: none;
+  z-index: 6;
 }
 .rr-work-bar {
   display: flex;
@@ -694,11 +718,19 @@ body.rr-kb #rr-thread-body.rr-scroll {
   gap: 4px;
   background: var(--rr-elevated);
   border: 1px solid var(--rr-border);
-  border-radius: 22px;
+  border-radius: 24px;
   padding: 8px 10px 6px;
   min-height: 0;
   width: 100%;
   box-sizing: border-box;
+}
+/* Preferred ChatGPT-like single row: + | text | send */
+.rr-work-bar--row {
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 6px 8px 6px 6px;
+  min-height: 48px;
 }
 .rr-work-bar input,
 .rr-work-bar textarea {
@@ -714,7 +746,15 @@ body.rr-kb #rr-thread-body.rr-scroll {
   resize: none;
   line-height: 1.35;
   max-height: 96px;
-  padding: 2px 4px;
+  padding: 8px 6px;
+  margin: 0;
+}
+.rr-work-bar--row .rr-circ {
+  flex-shrink: 0;
+  align-self: center;
+  background: transparent;
+  width: 34px;
+  height: 34px;
 }
 .rr-composer-tools {
   display: flex;
@@ -737,7 +777,6 @@ body.rr-kb #rr-thread-body.rr-scroll {
   width: 34px;
   height: 34px;
 }
-/* legacy single-row still works if present */
 .rr-work-bar > .rr-circ { flex-shrink: 0; }
 
 /* Pull-to-refresh (list: pull down; thread: pull up at bottom) */
@@ -761,13 +800,13 @@ body.rr-kb #rr-thread-body.rr-scroll {
   order: 99;
 }
 
-/* Jump-to-latest (ChatGPT chevron) */
+/* Jump-to-latest (ChatGPT chevron) — inside thread shell, above composer */
 .rr-jump-latest {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(72px + env(safe-area-inset-bottom, 0px));
-  z-index: 6;
+  bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+  z-index: 7;
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -778,9 +817,9 @@ body.rr-kb #rr-thread-body.rr-scroll {
   place-items: center;
   cursor: pointer;
   box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  padding: 0;
 }
 .rr-jump-latest--show { display: grid; }
-body.rr-kb .rr-jump-latest { bottom: 56px; }
 .rr-jump-latest svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
 
 /* Overflow menu (⋯) */
