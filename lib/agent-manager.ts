@@ -649,11 +649,19 @@ export class AgentManager extends EventEmitter {
    * Re-read host chat_history.jsonl into agent history so CLI SSH turns
    * show up in the phone Remote UI after the user typed outside grok-remote.
    */
-  async reseedFromHost(sessionId: string): Promise<{ ok: true; seeded: number; agentId: string }> {
+  async reseedFromHost(sessionId: string): Promise<{
+    ok: true;
+    seeded: number;
+    agentId: string;
+    hostMtimeMs: number;
+    unchanged?: boolean;
+  }> {
     if (!sessionId) throw new Error('sessionId required');
-    const { findSessionDir, seedHistoryFromSession } = await import('./session-index.js');
+    const { findSessionDir, seedHistoryFromSession, sessionHistoryMtimeMs } = await import('./session-index.js');
     const sessionDir = findSessionDir(sessionId);
     if (!sessionDir) throw new Error('no local session dir — cannot reseed from host');
+
+    const hostMtimeMs = sessionHistoryMtimeMs(sessionDir);
 
     // Ensure agent shell exists (disconnected ok)
     const pub = await this.importHostSession({
@@ -677,7 +685,7 @@ export class AgentManager extends EventEmitter {
       throw new Error(`failed to reset history: ${err instanceof Error ? err.message : String(err)}`);
     }
     const seeded = seedHistoryFromSession(sessionDir, agentId, (id, rec) => historyAppend(id, rec));
-    return { ok: true, seeded, agentId };
+    return { ok: true, seeded, agentId, hostMtimeMs };
   }
 
   async importHostSession(opts: {

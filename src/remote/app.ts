@@ -412,6 +412,7 @@ export class RemoteApp {
   private _vvBound = false;
   private _visBound = false;
   private _lastHistFingerprint = '';
+  private _hostHistMtimeMs = 0;
   private _threadScroll: HTMLElement | null = null;
   /** Last assistant text painted from history — used to ignore SSE replay. */
   private _seedAsstTail = '';
@@ -580,42 +581,67 @@ export class RemoteApp {
     }
   }
 
+  /** Content fingerprint — stable across reseed rewrites of identical transcript. */
+  private turnsFingerprint(turns: Array<{ role: string; text: string }>): string {
+    if (!turns.length) return '0';
+    const head = turns.slice(0, 3).map((t) => `${t.role}:${t.text.slice(0, 40)}`).join('|');
+    const tail = turns.slice(-5).map((t) => `${t.role}:${t.text.slice(0, 80)}`).join('|');
+    return `${turns.length}:${head}::${tail}`;
+  }
+
   /** While a thread is open: poll history + refresh on tab focus so long-lived PWAs stay current. */
   private startThreadSync(agentId: string, scroll: HTMLElement): void {
     this.stopHistPoll();
     this._threadScroll = scroll;
+    const sessionId = this._threadSessionId || agentId;
 
     const sync = async (reason: string): Promise<void> => {
       if (parseRoute().name !== 'thread') return;
       if (this._sending || this._liveAsstText) return; // don't clobber live stream mid-token
       try {
-        // Re-import CLI/SSH turns that landed on disk while phone was open
+        // Reseed only when host chat_history may have changed.
+        // Reseeding every poll rewrote history and caused the 20–30s scroll jump.
         if (reason === 'poll' || reason === 'visibility') {
           try {
-            await apiPost(`/api/remote/sessions/${encodeURIComponent(agentId)}/reseed`, {});
+            const r = await apiPost<{ hostMtimeMs?: number }>(
+              `/api/remote/sessions/${encodeURIComponent(sessionId)}/reseed`,
+              {},
+            );
+            if (typeof r.hostMtimeMs === 'number') {
+              if (r.hostMtimeMs === this._hostHistMtimeMs && reason === 'poll') {
+                return; // host unchanged
+              }
+              this._hostHistMtimeMs = r.hostMtimeMs;
+            }
           } catch { /* no local dir */ }
         }
-        const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
+        const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=200`, {
           headers: { accept: 'application/x-ndjson' },
         });
         if (!histRes.ok) return;
         const raw = await histRes.text();
-        // Cheap fingerprint: length + last 200 chars
-        const fp = `${raw.length}:${raw.slice(-200)}`;
+        const turns = parseHistoryTurns(raw);
+        const fp = this.turnsFingerprint(turns);
         if (fp === this._lastHistFingerprint) return;
         this._lastHistFingerprint = fp;
-        const turns = parseHistoryTurns(raw);
-        const nearBottom =
-          scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80;
-        this.paintTurns(scroll, turns, { skipQuote: turns.length <= 1 });
-        if (nearBottom) {
-          requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
-        }
+        const prevTop = scroll.scrollTop;
+        const prevHeight = scroll.scrollHeight;
+        const nearBottom = prevTop + scroll.clientHeight >= prevHeight - 80;
+        this.paintTurns(scroll, turns, { skipQuote: true });
+        requestAnimationFrame(() => {
+          if (nearBottom) {
+            scroll.scrollTop = scroll.scrollHeight;
+          } else {
+            const delta = scroll.scrollHeight - prevHeight;
+            if (Math.abs(delta) < 8) scroll.scrollTop = prevTop;
+            else scroll.scrollTop = Math.max(0, prevTop);
+          }
+        });
         if (reason === 'visibility') this.toast('Conversation updated');
       } catch { /* ignore */ }
     };
 
-    this._histPoll = setInterval(() => { void sync('poll'); }, 12_000);
+    this._histPoll = setInterval(() => { void sync('poll'); }, 25_000);
 
     if (!this._visBound) {
       this._visBound = true;
@@ -714,6 +740,7 @@ export class RemoteApp {
     this._turnGotAsst = false;
     this._threadScroll = null;
     this._lastHistFingerprint = '';
+    this._hostHistMtimeMs = 0;
     this._seedAsstTail = '';
     this._streamPriming = false;
     this._acceptStream = false;
@@ -1086,6 +1113,8 @@ export class RemoteApp {
         return;
       }
     }
+    const nearBottom =
+      scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 120;
     this._liveAsstText += chunk;
     this._turnGotAsst = true;
     const sid = this._threadSessionId || undefined;
@@ -1096,10 +1125,13 @@ export class RemoteApp {
       const body = this._liveAsstEl.querySelector('.rr-body') as HTMLElement | null;
       if (body) body.innerHTML = formatMessage(this._liveAsstText.slice(0, 16000), { sessionId: sid });
     }
-    scroll.scrollTop = scroll.scrollHeight;
+    // Never yank the user mid-read (was jumping every poll / stream tick)
+    if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
   }
 
   private setStatus(scroll: HTMLElement, text: string | null): void {
+    const nearBottom =
+      scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 120;
     if (this._statusEl) {
       this._statusEl.remove();
       this._statusEl = null;
@@ -1107,7 +1139,7 @@ export class RemoteApp {
     if (!text) return;
     this._statusEl = el('div', { class: 'rr-muted rr-live-status' }, text);
     this.insertBeforeBottomPtr(scroll, this._statusEl);
-    scroll.scrollTop = scroll.scrollHeight;
+    if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
   }
 
   private connectStream(agentId: string, scroll: HTMLElement): void {
@@ -1311,16 +1343,20 @@ export class RemoteApp {
       try {
         // Pull latest CLI/SSH turns from host disk into remote history first
         try {
-          await apiPost(`/api/remote/sessions/${encodeURIComponent(sessionId)}/reseed`, {});
+          const r = await apiPost<{ hostMtimeMs?: number }>(
+            `/api/remote/sessions/${encodeURIComponent(sessionId)}/reseed`,
+            {},
+          );
+          if (typeof r.hostMtimeMs === 'number') this._hostHistMtimeMs = r.hostMtimeMs;
         } catch { /* cloud-only or no dir — ignore */ }
-        const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
+        const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=200`, {
           headers: { accept: 'application/x-ndjson' },
         });
         if (!histRes.ok) throw new Error('history failed');
         const raw = await histRes.text();
-        this._lastHistFingerprint = `${raw.length}:${raw.slice(-200)}`;
         const turns = parseHistoryTurns(raw);
-        this.paintTurns(scroll, turns, { skipQuote: turns.length <= 1 });
+        this._lastHistFingerprint = this.turnsFingerprint(turns);
+        this.paintTurns(scroll, turns, { skipQuote: true });
         if (!scroll.querySelector('.rr-ptr--bottom')) {
           this.attachPullToRefresh(scroll, softRefresh, 'up');
         }
@@ -1380,37 +1416,29 @@ export class RemoteApp {
         ? 'Cloud archive on this account — no transcript files on this host. Start a related task below.'
         : null;
 
-      const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
+      // Always reseed from CLI disk first so PWA mirrors TUI transcript, then paint once
+      try {
+        const r = await apiPost<{ hostMtimeMs?: number }>(
+          `/api/remote/sessions/${encodeURIComponent(sessionId)}/reseed`,
+          {},
+        );
+        if (typeof r.hostMtimeMs === 'number') this._hostHistMtimeMs = r.hostMtimeMs;
+      } catch { /* cloud-only */ }
+
+      const histRes = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=200`, {
         headers: { accept: 'application/x-ndjson' },
       });
       const turns = histRes.ok ? parseHistoryTurns(await histRes.text()) : [];
+      this._lastHistFingerprint = this.turnsFingerprint(turns);
       this.paintTurns(scroll, turns, {
         stuckLabel,
         infoBanner,
-        skipQuote: turns.length <= 1,
+        skipQuote: true,
       });
       // Jump to latest (ChatGPT-style open)
       requestAnimationFrame(() => {
         scroll.scrollTop = scroll.scrollHeight;
       });
-
-      // Pull any CLI turns written after last import (SSH while phone was closed)
-      try {
-        await apiPost(`/api/remote/sessions/${encodeURIComponent(sessionId)}/reseed`, {});
-        const hist2 = await fetch(`/api/agents/${encodeURIComponent(agentId)}/history?turns=80`, {
-          headers: { accept: 'application/x-ndjson' },
-        });
-        if (hist2.ok) {
-          const raw2 = await hist2.text();
-          this._lastHistFingerprint = `${raw2.length}:${raw2.slice(-200)}`;
-          this.paintTurns(scroll, parseHistoryTurns(raw2), {
-            stuckLabel,
-            infoBanner,
-            skipQuote: true,
-          });
-          requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
-        }
-      } catch { /* keep seeded history */ }
 
       // Live token stream + background history sync for long-lived PWA tabs
       this.connectStream(agentId, scroll);

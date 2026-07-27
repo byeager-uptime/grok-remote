@@ -468,45 +468,24 @@ function extractAssistantText(content: unknown): string {
 }
 
 /**
- * Convert a grok chat_history.jsonl into grok-remote history events so the
- * chat UI can replay prior turns without reconnecting.
+ * Convert grok chat_history.jsonl → remote history events.
+ * Goal: PWA thread is a full mirror of the CLI transcript (same user_query +
+ * every assistant text bubble the TUI shows), not a collapsed summary.
  *
- * Phone UI wants a readable transcript of the CLI chat:
- * - real user_query only (no resume dumps / system-reminders)
- * - one assistant bubble per user turn (last substantial reply, not every status line)
- * - older user_query hooks from compaction segments when chat_history was compacted
+ * - Keep every real user_query and every assistant message (in order)
+ * - Drop harness noise only (system-reminder, resume dumps)
+ * - Stable timestamps so reseed does not thrash the client fingerprint / scroll
  */
 export function seedHistoryFromSession(sessionDir: string, agentId: string, append: (id: string, rec: Record<string, unknown>) => void): number {
   const histPath = path.join(sessionDir, 'chat_history.jsonl');
   let n = 0;
 
-  // Note: compaction segments only have reliable user_query text, not answers.
-  // Injecting them as orphan user bubbles confuses the phone transcript.
-  // Instead, if compaction exists and chat_history is thin, add one marker turn.
-  const compDir = path.join(sessionDir, 'compaction');
-  let hasCompaction = false;
-  try {
-    hasCompaction = fs.existsSync(compDir) && fs.readdirSync(compDir).some((f) => /^segment_\d+\.md$/i.test(f));
-  } catch { /* ignore */ }
-
-  if (!fs.existsSync(histPath)) {
-    if (hasCompaction) {
-      append(agentId, {
-        at: new Date().toISOString(),
-        event: 'user_message',
-        data: {
-          text: '(Earlier CLI turns were compacted on the host. Open this session in the CLI/TUI for the full scrollback, or pull-up refresh after more live turns.)',
-        },
-      });
-      n++;
-    }
-    return n;
-  }
+  if (!fs.existsSync(histPath)) return 0;
   let raw: string;
-  try { raw = fs.readFileSync(histPath, 'utf8'); } catch { return n; }
+  try { raw = fs.readFileSync(histPath, 'utf8'); } catch { return 0; }
 
   type RawTurn = { role: 'user' | 'asst'; text: string };
-  const rawTurns: RawTurn[] = [];
+  const turns: RawTurn[] = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let o: { type?: string; content?: unknown };
@@ -514,71 +493,39 @@ export function seedHistoryFromSession(sessionDir: string, agentId: string, appe
     if (o.type === 'user') {
       const text = extractUserText(o.content);
       if (!text || isNoiseUserText(text)) continue;
-      rawTurns.push({ role: 'user', text });
+      turns.push({ role: 'user', text });
     } else if (o.type === 'assistant') {
       const text = extractAssistantText(o.content);
       if (!text) continue;
-      rawTurns.push({ role: 'asst', text });
+      // Skip pure empty / whitespace already handled; keep short status lines —
+      // the TUI shows them and collapsing was the mirror bug.
+      turns.push({ role: 'asst', text });
     }
   }
 
-  // Collapse consecutive assistant status lines into the last substantial one
-  // so Remote shows the answer, not every "Checking…" intermediate.
-  const collapsed: RawTurn[] = [];
-  let pendingAsst: string[] = [];
-  const flushAsst = (): void => {
-    if (!pendingAsst.length) return;
-    // Prefer longest chunk (usually the real answer); fall back to last
-    let best = pendingAsst[pendingAsst.length - 1]!;
-    for (const p of pendingAsst) {
-      if (p.length > best.length) best = p;
-    }
-    // If last is a short status and earlier is long, keep long; if last is long, keep last
-    const last = pendingAsst[pendingAsst.length - 1]!;
-    if (last.length >= 80 || last.length >= best.length * 0.6) best = last;
-    collapsed.push({ role: 'asst', text: best });
-    pendingAsst = [];
-  };
-  for (const t of rawTurns) {
-    if (t.role === 'user') {
-      flushAsst();
-      // Dedupe against compaction-seeded same user text (recent overlap)
-      collapsed.push(t);
-    } else {
-      pendingAsst.push(t.text);
-    }
-  }
-  flushAsst();
-
-  // Drop exact consecutive duplicate users (compaction + live overlap)
+  // Exact consecutive dupes only (seed re-run safety)
   const final: RawTurn[] = [];
-  for (const t of collapsed) {
+  for (const t of turns) {
     const prev = final[final.length - 1];
     if (prev && prev.role === t.role && prev.text === t.text) continue;
-    // Also skip user if same text appeared earlier (compaction seed + live)
-    if (t.role === 'user' && final.some((x) => x.role === 'user' && x.text === t.text)) continue;
     final.push(t);
   }
 
-  // If most of the CLI chat was compacted away, surface that honestly at the top
-  if (hasCompaction && final.filter((t) => t.role === 'user').length <= 8) {
-    append(agentId, {
-      at: new Date().toISOString(),
-      event: 'user_message',
-      data: {
-        text: '(Earlier turns in this CLI session were compacted on the host — Remote shows the live transcript below. Full scrollback is still on hermes-agent.)',
-      },
-    });
-    n++;
-  }
+  // Content-stable clock so reseed rewrites do not change history fingerprint
+  let seq = 0;
+  const atFor = (): string => {
+    seq += 1;
+    // Fixed epoch + sequence → identical reseed output when chat_history unchanged
+    return new Date(1_700_000_000_000 + seq * 1000).toISOString();
+  };
 
   for (const t of final) {
     if (t.role === 'user') {
-      append(agentId, { at: new Date().toISOString(), event: 'user_message', data: { text: t.text } });
+      append(agentId, { at: atFor(), event: 'user_message', data: { text: t.text } });
       n++;
     } else {
       append(agentId, {
-        at: new Date().toISOString(),
+        at: atFor(),
         event: 'agent_message_chunk',
         data: {
           update: {
@@ -587,10 +534,19 @@ export function seedHistoryFromSession(sessionDir: string, agentId: string, appe
           },
         },
       });
-      // Close the turn so UI doesn't fuse with next asst
-      append(agentId, { at: new Date().toISOString(), event: 'prompt_complete', data: {} });
+      append(agentId, { at: atFor(), event: 'prompt_complete', data: {} });
       n++;
     }
   }
   return n;
+}
+
+/** Host chat_history mtime (ms) for cheap reseed skip when unchanged. */
+export function sessionHistoryMtimeMs(sessionDir: string): number {
+  const histPath = path.join(sessionDir, 'chat_history.jsonl');
+  try {
+    return fs.statSync(histPath).mtimeMs;
+  } catch {
+    return 0;
+  }
 }
